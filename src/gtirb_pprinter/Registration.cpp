@@ -21,6 +21,7 @@
 #include "MasmPrettyPrinter.hpp"
 #include "Mips32PrettyPrinter.hpp"
 #include "PrettyPrinter.hpp"
+#include "RiscvPrettyPrinter.hpp"
 #include <gtirb/gtirb.hpp>
 
 namespace gtirb_pprint {
@@ -46,6 +47,7 @@ void registerAuxDataTypes() {
   gtirb::AuxDataContainer::registerAuxDataType<ElfSymbolVersions>();
   gtirb::AuxDataContainer::registerAuxDataType<SymbolicExpressionSizes>();
   gtirb::AuxDataContainer::registerAuxDataType<BinaryType>();
+  gtirb::AuxDataContainer::registerAuxDataType<ArchInfo>();
   gtirb::AuxDataContainer::registerAuxDataType<PEResources>();
   gtirb::AuxDataContainer::registerAuxDataType<TypeTable>();
   gtirb::AuxDataContainer::registerAuxDataType<PrototypeTable>();
@@ -79,6 +81,11 @@ void registerPrettyPrinters() {
                   std::make_shared<Mips32PrettyPrinterFactory>());
   setDefaultSyntax({"elf", "raw"}, {"mips32"}, {"assembler", "ui", "debug"},
                    "mips32");
+
+  registerPrinter({"elf", "raw"}, {"riscv32", "riscv64"}, {"riscv"},
+                  std::make_shared<RiscvPrettyPrinterFactory>());
+  setDefaultSyntax({"elf", "raw"}, {"riscv32", "riscv64"},
+                   {"assembler", "ui", "debug"}, "riscv");
 
   registerPrinter({"pe", "raw"}, {"x86", "x64"}, {"masm"},
                   std::make_shared<MasmPrettyPrinterFactory>());

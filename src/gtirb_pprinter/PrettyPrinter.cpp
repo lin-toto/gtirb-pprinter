@@ -137,6 +137,16 @@ std::string getModuleISA(const gtirb::Module& module) {
   case gtirb::ISA::MIPS32:
     return "mips32";
   default:
+    if (const auto* ArchInfo =
+            module.getAuxData<gtirb::schema::ArchInfo>()) {
+      auto It = ArchInfo->find("ISA");
+      if (It != ArchInfo->end()) {
+        std::string ISA = ascii_str_tolower(It->second);
+        if (ISA == "riscv32" || ISA == "riscv64") {
+          return ISA;
+        }
+      }
+    }
     return "undefined";
   }
 }

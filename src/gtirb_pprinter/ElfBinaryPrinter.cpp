@@ -22,6 +22,7 @@
 #include "ElfVersionScriptPrinter.hpp"
 #include "FileUtils.hpp"
 #include "Mips32PrettyPrinter.hpp"
+#include "RiscvPrettyPrinter.hpp"
 #include "driver/Logger.h"
 #include <boost/filesystem.hpp>
 #include <fstream>
@@ -89,8 +90,8 @@ bool isBlackListed(std::string sym) {
 Get an appropriate syntax for an architecture
 */
 static std::unique_ptr<gtirb_pprint::ElfSyntax>
-getISASyntax(const gtirb::ISA ISA) {
-  switch (ISA) {
+getISASyntax(const gtirb::Module& Module) {
+  switch (Module.getISA()) {
   case gtirb::ISA::ARM64:
     return std::make_unique<gtirb_pprint::Arm64Syntax>();
   case gtirb::ISA::ARM:
@@ -99,7 +100,12 @@ getISASyntax(const gtirb::ISA ISA) {
     return std::make_unique<gtirb_pprint::Mips32Syntax>();
   case gtirb::ISA::X64:
   case gtirb::ISA::IA32:
+    return std::make_unique<gtirb_pprint::ElfSyntax>();
   default:
+    std::string ISA = gtirb_pprint::getModuleISA(Module);
+    if (ISA == "riscv32" || ISA == "riscv64") {
+      return std::make_unique<gtirb_pprint::RiscvSyntax>();
+    }
     return std::make_unique<gtirb_pprint::ElfSyntax>();
   }
 }
@@ -119,8 +125,7 @@ bool ElfBinaryPrinter::generateDummySO(
     std::ofstream AsmFile(AsmFilePath.string());
     AsmFile << "# Generated dummy file for .so undefined symbols\n";
 
-    std::unique_ptr<gtirb_pprint::ElfSyntax> Syntax =
-        getISASyntax(Module.getISA());
+    std::unique_ptr<gtirb_pprint::ElfSyntax> Syntax = getISASyntax(Module);
 
     std::map<std::string, int> VersionedSymNameCounts;
     for (auto& SymGroup : SymGroups) {

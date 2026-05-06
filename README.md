@@ -43,6 +43,10 @@ Use the following options to configure cmake:
 - You can use vcpkg on Windows to provide some dependencies by passing
   `-DCMAKE_TOOLCHAIN_FILE=<path-to-vcpkg\scripts\buildsystems\vcpkg.cmake>`.
 
+The ELF pretty printer supports the `arm`, `arm64`, `att`, `intel`, `masm`,
+`mips32`, and `riscv` assembly syntaxes. RISC-V printing expects the frontend to
+preserve RISC-V relocation metadata such as `%pcrel_hi`/`%pcrel_lo` pairs.
+
 Once the dependencies are installed, you can configure and build as follows:
 
 ```sh
@@ -116,6 +120,7 @@ associated types and contents in this table.
 | sectionProperties | `std::map<gtirb::UUID, std::tuple<uint64_t, uint64_t>>` | Map from section UUIDs to tuples with the section types and flags. |
 | cfiDirectives   | `std::map<gtirb::Offset, std::vector<std::tuple<std::string, std::vector<int64_t>, gtirb::UUID>>>` | Map from Offsets to  vector of cfi directives. A cfi directive contains: a string describing the directive, a vector  of numeric arguments, and an optional symbolic argument (represented with the UUID of the symbol). |
 | elfSymbolInfo | `std::map<gtirb::UUID, std::tuple<uint64_t, std::string, std::string, std::string, uint64_t>>` | On ELF targets only: Map from symbols to their type, binding, and visibility categories. |
+| archInfo | `std::map<std::string, std::string>` | Extra architecture metadata. RISC-V frontends should set `ISA` to `riscv32` or `riscv64` when the GTIRB module ISA is `ValidButUnsupported`. |
 
 ## AuxData Used by the Binary Printer
 

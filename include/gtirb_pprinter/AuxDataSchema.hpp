@@ -106,6 +106,12 @@ struct BinaryType {
   typedef std::vector<std::string> Type;
 };
 
+/// \brief Auxiliary data describing a binary's architecture.
+struct ArchInfo {
+  static constexpr const char* Name = "archInfo";
+  typedef std::map<std::string, std::string> Type;
+};
+
 /// \brief Auxiliary data representing the export table of a PE file.
 struct ExportEntries {
   static constexpr const char* Name = "peExportEntries";

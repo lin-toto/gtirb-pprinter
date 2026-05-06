@@ -158,7 +158,7 @@ int main(int argc, char** argv) {
                      "The format of the target binary object: elf, pe, or raw");
   desc.add_options()("syntax,s", po::value<std::string>(),
                      "The syntax of the assembly file to generate: "
-                     "arm, arm64, att, intel, masm, mips32");
+                     "arm, arm64, att, intel, masm, mips32, riscv");
   desc.add_options()("layout,l", "Layout code and data in memory to "
                                  "avoid overlap");
   desc.add_options()(

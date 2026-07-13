@@ -15,6 +15,7 @@
 
 #include <cstring>
 #include <iostream>
+#include <sstream>
 
 #include "Arm64PrettyPrinter.hpp"
 #include "AuxDataSchema.hpp"
@@ -24,6 +25,38 @@
 #include <capstone/capstone.h>
 
 namespace gtirb_pprint {
+
+namespace {
+
+bool hasArchFeature(const gtirb::Module& Module, const std::string& Feature) {
+  const auto* ArchInfo = Module.getAuxData<gtirb::schema::ArchInfo>();
+  if (!ArchInfo) {
+    return false;
+  }
+
+  const auto It = ArchInfo->find("features");
+  if (It == ArchInfo->end()) {
+    return false;
+  }
+
+  std::string Features = ascii_str_tolower(It->second);
+  for (char& C : Features) {
+    if (C == ',' || C == ';') {
+      C = ' ';
+    }
+  }
+
+  std::istringstream Tokens(Features);
+  std::string Token;
+  while (Tokens >> Token) {
+    if (Token == Feature) {
+      return true;
+    }
+  }
+  return false;
+}
+
+} // namespace
 
 Arm64PrettyPrinter::Arm64PrettyPrinter(gtirb::Context& context_,
                                        const gtirb::Module& module_,
@@ -60,7 +93,11 @@ void Arm64PrettyPrinter::buildSymGotRefTable(void) {
 
 void Arm64PrettyPrinter::printHeader(std::ostream& os) {
   this->printBar(os);
-  os << ".arch armv8-a\n";
+  if (hasArchFeature(module, "mte")) {
+    os << ".arch armv8.5-a+memtag\n";
+  } else {
+    os << ".arch armv8-a\n";
+  }
   this->printBar(os);
   os << '\n';
 }

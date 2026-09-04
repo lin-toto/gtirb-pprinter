@@ -1,6 +1,11 @@
 import gtirb
 
-from gtirb_helpers import add_code_block, add_text_section, create_test_module
+from gtirb_helpers import (
+    add_code_block,
+    add_symbol,
+    add_text_section,
+    create_test_module,
+)
 from pprinter_helpers import run_asm_pprinter, PPrinterTest
 
 
@@ -62,9 +67,88 @@ class ATTInstructionsTest(PPrinterTest):
         for insn_bytes, insn_str in instructions:
             self._assert_att_insn(insn_bytes, insn_str)
 
+    def test_rotate_att(self):
+        """Variable-count rotates must retain Capstone's implicit %cl."""
+        instructions = [
+            (b"\xD3\x45\xEC", "roll %cl,-20(%rbp)"),
+            (b"\xD3\x4D\xEC", "rorl %cl,-20(%rbp)"),
+            (b"\xD3\x55\xEC", "rcll %cl,-20(%rbp)"),
+            (b"\xD3\x5D\xEC", "rcrl %cl,-20(%rbp)"),
+        ]
+
+        for insn_bytes, insn_str in instructions:
+            self._assert_att_insn(insn_bytes, insn_str)
+
     def test_xabort_att(self):
         """
         Ensure xabort's 1-byte immediate operand is printed as unsigned int
         rather than a signed integer for newer assembler compatibility.
         """
         self._assert_att_insn(b"\xC6\xF8\xFF", "xabort $255")
+
+    def test_fsgsbase_att(self):
+        """GNU as rejects the nonstandard rdfsbaseq/rdgsbaseq spellings."""
+        self._assert_att_insn(b"\xF3\x48\x0F\xAE\xC0", "rdfsbase %rax")
+        self._assert_att_insn(b"\xF3\x48\x0F\xAE\xC8", "rdgsbase %rax")
+
+    def test_fixed_width_interrupts_att(self):
+        """The one-byte INT1/INT3 opcodes must keep their native encodings."""
+        self._assert_att_insn(b"\xF1", ".byte 0xf1")
+        self._assert_att_insn(b"\xCC", ".byte 0xcc")
+
+    def test_sha1msg2_is_not_arm64_nop_att(self):
+        """Architecture-local Capstone IDs must not collide across ISAs."""
+        self._assert_att_insn(
+            b"\x0F\x38\xCA\xDE", "sha1msg2 %xmm6,%xmm3"
+        )
+
+    def test_bnd_branch_without_symbol_att(self):
+        """An unsymbolized MPX branch retains every original byte."""
+        ir, m = create_test_module(
+            file_format=gtirb.Module.FileFormat.ELF,
+            isa=gtirb.Module.ISA.X64,
+        )
+        _, bi = add_text_section(m)
+        add_code_block(bi, b"\xF2\x73\x00\xC3")
+        asm = run_asm_pprinter(ir, ["--syntax=att"])
+        self.assertIn(".byte 0xf2", asm)
+        self.assertIn(".byte 0x73", asm)
+        self.assertNotIn("bnd jae", asm)
+
+    def test_bnd_branch_with_symbol_att(self):
+        """A symbolic MPX branch keeps a relocatable underlying Jcc."""
+        ir, m = create_test_module(
+            file_format=gtirb.Module.FileFormat.ELF,
+            isa=gtirb.Module.ISA.X64,
+        )
+        _, bi = add_text_section(m)
+        branch = add_code_block(bi, b"\xF2\x73\x00")
+        target = add_code_block(bi, b"\xC3")
+        target_symbol = add_symbol(m, "target", target)
+        bi.symbolic_expressions[branch.offset + 2] = gtirb.SymAddrConst(
+            0, target_symbol
+        )
+        asm = run_asm_pprinter(ir, ["--syntax=att"])
+        self.assertIn(".byte 0xf2", asm)
+        self.assertIn("jae target", asm)
+        self.assertNotIn("bnd jae", asm)
+
+    def test_symbolic_loop_uses_near_jump_trampoline_att(self):
+        """A rel8-only LOOP remains relocatable after section growth."""
+        ir, m = create_test_module(
+            file_format=gtirb.Module.FileFormat.ELF,
+            isa=gtirb.Module.ISA.X64,
+        )
+        _, bi = add_text_section(m, address=0x1000)
+        branch = add_code_block(bi, b"\xE2\x00")
+        target = add_code_block(bi, b"\xC3")
+        target_symbol = add_symbol(m, "loop_target", target)
+        bi.symbolic_expressions[branch.offset + 1] = gtirb.SymAddrConst(
+            0, target_symbol
+        )
+
+        asm = run_asm_pprinter(ir, ["--syntax=att"])
+
+        self.assertIn("loop .Lgtirb_x86_loop_taken_1000", asm)
+        self.assertIn("jmp .Lgtirb_x86_loop_done_1000", asm)
+        self.assertIn("jmp loop_target", asm)

@@ -732,12 +732,16 @@ void PrettyPrinterBase::x86FixupInstruction(cs_insn& inst) {
     detail.operands[0].size = 0;
   }
 
-  // RDRAND and RDSEED should be printed with no suffix:
+  // RDRAND, RDSEED, RDFSBASE, and RDGSBASE should be printed with no suffix:
   // https://github.com/aquynh/capstone/issues/1603
   if (inst.id == X86_INS_RDRAND) {
     strcpy(inst.mnemonic, "rdrand");
   } else if (inst.id == X86_INS_RDSEED) {
     strcpy(inst.mnemonic, "rdseed");
+  } else if (inst.id == X86_INS_RDFSBASE) {
+    strcpy(inst.mnemonic, "rdfsbase");
+  } else if (inst.id == X86_INS_RDGSBASE) {
+    strcpy(inst.mnemonic, "rdgsbase");
   }
 
   // PUNPCKL* memory operands are 32 bits
@@ -747,13 +751,12 @@ void PrettyPrinterBase::x86FixupInstruction(cs_insn& inst) {
         detail.operands[1].size == 8) {
       detail.operands[1].size = 4;
     }
-  } else if (inst.id == X86_INS_INT1 || inst.id == X86_INS_INT3) {
-    int N = (inst.id == X86_INS_INT1 ? 1 : 3);
-    strcpy(inst.mnemonic, "int");
-    detail.operands[0].type = X86_OP_IMM;
-    detail.operands[0].imm = N;
-    detail.op_count = 1;
   }
+
+  // Keep Capstone's operand-free INT1 and INT3 mnemonics for ELF output.
+  // GNU as encodes `int1` and `int3` as their original one-byte opcodes,
+  // whereas spelling them as `int $1` or `int $3` emits a two-byte INT imm8
+  // instruction and shifts every following address.
 
   // Capstone reports xabort's immediate operand size as 4 bytes (x86) or
   // 8 bytes (x64) due to absolute address resolution, but the native encoding
@@ -788,7 +791,17 @@ void PrettyPrinterBase::printInstruction(std::ostream& os,
   ////////////////////////////////////////////////////////////////////
   // special cases
 
-  if (inst.id == X86_INS_NOP || inst.id == ARM64_INS_NOP) {
+  // Capstone instruction identifiers are architecture-local enums.  In
+  // particular, ARM64_INS_NOP has the same numeric value as
+  // X86_INS_SHA1MSG2, so comparing an x86 instruction against both enums
+  // silently turns SHA1MSG2 into NOPs.  Scope each comparison to the module
+  // ISA instead of mixing enum domains.
+  const bool IsNop =
+      ((module.getISA() == gtirb::ISA::X64 ||
+        module.getISA() == gtirb::ISA::IA32) &&
+       inst.id == X86_INS_NOP) ||
+      (module.getISA() == gtirb::ISA::ARM64 && inst.id == ARM64_INS_NOP);
+  if (IsNop) {
     uint64_t i = 0;
     do {
       std::stringstream InstructLine;
@@ -956,7 +969,15 @@ void PrettyPrinterBase::printOperand(std::ostream& os,
     printOpIndirect(os, symbolic, inst, index);
     return;
   case X86_OP_INVALID:
-    std::cerr << "invalid operand\n";
+    std::cerr << "invalid operand: address=0x" << std::hex << inst.address
+              << std::dec << " index=" << index << " id=" << inst.id
+              << " mnemonic=" << inst.mnemonic << " op_str=" << inst.op_str
+              << " bytes=";
+    for (uint8_t I = 0; I < inst.size; ++I) {
+      std::cerr << std::hex << std::setfill('0') << std::setw(2)
+                << static_cast<unsigned>(inst.bytes[I]);
+    }
+    std::cerr << std::dec << '\n';
     exit(1);
   }
 }

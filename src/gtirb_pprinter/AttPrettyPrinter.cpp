@@ -45,6 +45,10 @@ void AttPrettyPrinter::fixupInstruction(const gtirb::CodeBlock& block,
   case X86_INS_SHL:
   case X86_INS_SHR:
   case X86_INS_SAR:
+  case X86_INS_ROL:
+  case X86_INS_ROR:
+  case X86_INS_RCL:
+  case X86_INS_RCR:
     if (Detail.op_count == 1) {
       // Check if %cl is a source register
       cs_regs RegsRead, RegsWrite;

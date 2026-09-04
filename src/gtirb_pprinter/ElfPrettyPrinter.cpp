@@ -14,9 +14,11 @@
 //===----------------------------------------------------------------------===//
 #include "ElfPrettyPrinter.hpp"
 #include "AuxDataUtils.hpp"
+#include "StringUtils.hpp"
 #include "driver/Logger.h"
 
 #include "AuxDataSchema.hpp"
+#include <cstring>
 #define SHT_NULL 0
 #define SHT_PROGBITS 1
 #define SHT_SYMTAB 2
@@ -138,6 +140,103 @@ void ElfPrettyPrinter::printInstruction(std::ostream& os,
                                         const gtirb::CodeBlock& block,
                                         const cs_insn& inst,
                                         const gtirb::Offset& offset) {
+  // LOOP/LOOPE/LOOPNE have only an 8-bit displacement encoding. Rewriting
+  // and section growth can move a symbolic destination out of that range,
+  // and GNU as cannot promote these instructions. Always route the short
+  // branch through a nearby label and use an ordinary near JMP for the real
+  // destination. The sequence preserves the count update, flags, and both
+  // taken/fall-through behavior.
+  if (inst.id == X86_INS_LOOP || inst.id == X86_INS_LOOPE ||
+      inst.id == X86_INS_LOOPNE) {
+    printComments(os, offset, inst.size);
+    printPrototype(os, block, offset);
+    printCFIDirectives(os, offset);
+
+    std::stringstream TakenName;
+    std::stringstream DoneName;
+    TakenName << ".Lgtirb_x86_loop_taken_" << std::hex << inst.address;
+    DoneName << ".Lgtirb_x86_loop_done_" << std::hex << inst.address;
+
+    if (inst.detail->x86.prefix[3] == X86_PREFIX_ADDRSIZE) {
+      os << syntax.tab() << "  .byte 0x67\n";
+    }
+    os << syntax.tab() << "  " << ascii_str_tolower(inst.mnemonic) << ' '
+       << TakenName.str() << '\n';
+    os << syntax.tab() << "  jmp " << DoneName.str() << '\n';
+    os << TakenName.str() << ":\n";
+
+    std::stringstream TargetLine;
+    printEA(TargetLine, gtirb::Addr(inst.address));
+    TargetLine << "  jmp ";
+    printOperandList(TargetLine, block, inst);
+    printCommentableLine(TargetLine, os, gtirb::Addr(inst.address));
+    os << '\n';
+    os << DoneName.str() << ":\n";
+    return;
+  }
+
+  // GNU as versions accepted by this project do not consistently recognize
+  // the operand-free INT1 mnemonic.  Printing INT1/INT3 as `int $N` is not a
+  // safe substitute: that form is two bytes, while the native opcodes are one
+  // byte.  Emit their exact bytes so later addresses remain unchanged.
+  if (inst.id == X86_INS_INT1 || inst.id == X86_INS_INT3) {
+    printComments(os, offset, inst.size);
+    printPrototype(os, block, offset);
+    printCFIDirectives(os, offset);
+
+    std::stringstream Line;
+    printEA(Line, gtirb::Addr(inst.address));
+    printByte(Line, static_cast<std::byte>(inst.bytes[0]));
+    printCommentableLine(Line, os, gtirb::Addr(inst.address));
+    os << '\n';
+    return;
+  }
+
+  // Recent GNU assemblers reject Capstone's textual `bnd jcc` spelling even
+  // though they accept and disassemble the original MPX branch encoding.  Keep
+  // the F2 prefix as an explicit byte and print the underlying branch normally.
+  // This preserves the exact encoding while retaining a symbolic branch operand
+  // that can be relocated when blocks move.
+  const std::string_view Mnemonic(inst.mnemonic);
+  if (inst.size > 1 && inst.bytes[0] == X86_PREFIX_REPNE &&
+      Mnemonic.substr(0, 4) == "bnd ") {
+    const gtirb::SymbolicExpression* BranchTarget = nullptr;
+    const auto* Interval = block.getByteInterval();
+    if (Interval && Interval->getAddress()) {
+      const uint8_t ImmediateOffset = inst.detail->x86.encoding.imm_offset;
+      BranchTarget = Interval->getSymbolicExpression(
+          gtirb::Addr(inst.address + ImmediateOffset) -
+          *Interval->getAddress());
+    }
+
+    // Without a symbolic target, spelling the branch operand as its decoded
+    // absolute address can make GNU as promote a short Jcc to its near form.
+    // Preserve all original bytes in that case.  A symbolic target permits the
+    // relocatable prefix-plus-branch form below.
+    if (!BranchTarget) {
+      printComments(os, offset, inst.size);
+      printPrototype(os, block, offset);
+      printCFIDirectives(os, offset);
+      for (uint8_t I = 0; I < inst.size; ++I) {
+        std::stringstream Line;
+        printEA(Line, gtirb::Addr(inst.address + I));
+        printByte(Line, static_cast<std::byte>(inst.bytes[I]));
+        printCommentableLine(Line, os, gtirb::Addr(inst.address + I));
+        os << '\n';
+      }
+      return;
+    }
+
+    os << syntax.tab() << "  .byte 0xf2\n";
+    cs_insn Unprefixed = inst;
+    const std::string_view BranchMnemonic = Mnemonic.substr(4);
+    std::memset(Unprefixed.mnemonic, 0, sizeof(Unprefixed.mnemonic));
+    std::memcpy(Unprefixed.mnemonic, BranchMnemonic.data(),
+                BranchMnemonic.size());
+    PrettyPrinterBase::printInstruction(os, block, Unprefixed, offset);
+    return;
+  }
+
   // Print explicit directives for instruction prefixes needed for @TLSGD
   // relocations, which require a fixed 16-byte instruction sequence.
   if (inst.id == X86_INS_LEA &&

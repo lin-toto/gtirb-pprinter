@@ -1,10 +1,67 @@
 import gtirb
 
-from gtirb_helpers import add_code_block, add_text_section, create_test_module
+from gtirb_helpers import (
+    add_code_block,
+    add_symbol,
+    add_text_section,
+    create_test_module,
+)
 from pprinter_helpers import run_asm_pprinter, PPrinterTest
 
 
 class IntelInstructionsTest(PPrinterTest):
+    def _assert_intel_insn(self, insn_bytes, insn_str):
+        ir, m = create_test_module(
+            file_format=gtirb.Module.FileFormat.ELF,
+            isa=gtirb.Module.ISA.X64,
+        )
+        _, bi = add_text_section(m)
+        add_code_block(bi, insn_bytes)
+        asm = run_asm_pprinter(ir, ["--syntax=intel"])
+        self.assertIn(insn_str, asm)
+
+    def test_fixed_width_interrupts_intel(self):
+        """The one-byte INT1/INT3 opcodes must keep their native encodings."""
+        self._assert_intel_insn(b"\xF1", ".byte 0xf1")
+        self._assert_intel_insn(b"\xCC", ".byte 0xcc")
+
+    def test_sha1msg2_is_not_arm64_nop_intel(self):
+        """Architecture-local Capstone IDs must not collide across ISAs."""
+        self._assert_intel_insn(
+            b"\x0F\x38\xCA\xDE", "sha1msg2 XMM3,XMM6"
+        )
+
+    def test_bnd_branch_without_symbol_intel(self):
+        """An unsymbolized MPX branch retains every original byte."""
+        ir, m = create_test_module(
+            file_format=gtirb.Module.FileFormat.ELF,
+            isa=gtirb.Module.ISA.X64,
+        )
+        _, bi = add_text_section(m)
+        add_code_block(bi, b"\xF2\x73\x00\xC3")
+        asm = run_asm_pprinter(ir, ["--syntax=intel"])
+        self.assertIn(".byte 0xf2", asm)
+        self.assertIn(".byte 0x73", asm)
+        self.assertNotIn("bnd jae", asm)
+
+    def test_bnd_branch_with_symbol_intel(self):
+        """A symbolic MPX branch keeps a relocatable underlying Jcc."""
+        ir, m = create_test_module(
+            file_format=gtirb.Module.FileFormat.ELF,
+            isa=gtirb.Module.ISA.X64,
+        )
+        _, bi = add_text_section(m)
+        branch = add_code_block(bi, b"\xF2\x73\x00")
+        target = add_code_block(bi, b"\xC3")
+        target_symbol = add_symbol(m, "target", target)
+        bi.symbolic_expressions[branch.offset + 2] = gtirb.SymAddrConst(
+            0, target_symbol
+        )
+        asm = run_asm_pprinter(ir, ["--syntax=intel"])
+        self.assertIn(".byte 0xf2", asm)
+        self.assertIn("jae target", asm)
+        self.assertNotIn("bnd jae", asm)
+
     def test_unpack_dd(self):
         # This test ensures that we do not regress on the following issue:
         # git.grammatech.com/rewriting/gtirb-pprinter/-/merge_requests/439

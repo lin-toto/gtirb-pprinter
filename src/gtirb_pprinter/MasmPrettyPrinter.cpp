@@ -567,6 +567,16 @@ void MasmPrettyPrinter::fixupInstruction(const gtirb::CodeBlock& block,
   }
 
   x86FixupInstruction(inst);
+
+  // MASM uses the immediate spelling accepted by the existing PE pipeline.
+  // ELF printers retain Capstone's fixed-width int1/int3 mnemonics.
+  if (inst.id == X86_INS_INT1 || inst.id == X86_INS_INT3) {
+    int N = (inst.id == X86_INS_INT1 ? 1 : 3);
+    strcpy(inst.mnemonic, "int");
+    Detail.operands[0].type = X86_OP_IMM;
+    Detail.operands[0].imm = N;
+    Detail.op_count = 1;
+  }
 }
 
 std::optional<std::string>

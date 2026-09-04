@@ -100,6 +100,7 @@ void Arm64PrettyPrinter::printHeader(std::ostream& os) {
   }
   this->printBar(os);
   os << '\n';
+  ElfPrettyPrinter::printHeader(os);
 }
 
 std::string Arm64PrettyPrinter::getRegisterName(unsigned int reg) const {

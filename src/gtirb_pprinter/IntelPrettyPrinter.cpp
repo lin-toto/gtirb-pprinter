@@ -70,6 +70,7 @@ void IntelPrettyPrinter::printHeader(std::ostream& os) {
   os << ".intel_syntax noprefix\n";
   this->printBar(os);
   os << '\n';
+  ElfPrettyPrinter::printHeader(os);
 }
 
 void IntelPrettyPrinter::printOpRegdirect(std::ostream& os, const cs_insn& inst,

@@ -306,7 +306,72 @@ void ElfPrettyPrinter::printByte(std::ostream& os, std::byte byte) {
   os.flags(flags);
 }
 
-void ElfPrettyPrinter::printFooter(std::ostream& /* os */){};
+bool ElfPrettyPrinter::isSkippedEhFrameBeginSymbol(
+    const gtirb::Symbol& Symbol) const {
+  if (Symbol.getName() != "__EH_FRAME_BEGIN__") {
+    return false;
+  }
+
+  const gtirb::Section* Section = nullptr;
+  if (const auto* Code = Symbol.getReferent<gtirb::CodeBlock>()) {
+    if (const auto* ByteInterval = Code->getByteInterval()) {
+      Section = ByteInterval->getSection();
+    }
+  } else if (const auto* Data = Symbol.getReferent<gtirb::DataBlock>()) {
+    if (const auto* ByteInterval = Data->getByteInterval()) {
+      Section = ByteInterval->getSection();
+    }
+  } else if (const auto Address = Symbol.getAddress()) {
+    if (const auto Container = getContainerSection(*Address)) {
+      Section = *Container;
+    }
+  }
+
+  return Section && Section->getName() == ".eh_frame" &&
+         shouldSkip(policy, *Section);
+}
+
+const gtirb::Symbol* ElfPrettyPrinter::getSkippedEhFrameBeginSymbol() const {
+  for (const auto& Symbol : module.symbols()) {
+    if (isSkippedEhFrameBeginSymbol(Symbol)) {
+      return &Symbol;
+    }
+  }
+  return nullptr;
+}
+
+void ElfPrettyPrinter::printHeader(std::ostream& OS) {
+  if (const auto* Symbol = getSkippedEhFrameBeginSymbol()) {
+    // Gas emits CFI-generated .eh_frame records in subsection zero.  Define
+    // the standard GCC anchor before those records so reprinted startup code
+    // registers the regenerated unwind table rather than a stale address.
+    OS << ".pushsection .eh_frame,\"a\",@progbits\n"
+       << ".subsection 0\n";
+    printSymbolDefinition(OS, *Symbol);
+    OS << ".popsection\n";
+  }
+}
+
+void ElfPrettyPrinter::printFooter(std::ostream& OS) {
+  if (getSkippedEhFrameBeginSymbol()) {
+    // Crtend normally contributes the terminal zero record.  Policies that
+    // reprint startup code also link with -nostartfiles, so emit that record
+    // after Gas's subsection-zero CFI records in subsection one.
+    OS << ".pushsection .eh_frame,\"a\",@progbits\n"
+       << ".subsection 1\n"
+       << ".long 0\n"
+       << ".popsection\n";
+  }
+}
+
+bool ElfPrettyPrinter::printSymbolReference(std::ostream& OS,
+                                            const gtirb::Symbol* Symbol) {
+  if (Symbol && isSkippedEhFrameBeginSymbol(*Symbol)) {
+    OS << getSymbolName(*Symbol);
+    return false;
+  }
+  return PrettyPrinterBase::printSymbolReference(OS, Symbol);
+}
 
 void ElfPrettyPrinter::printSymbolHeader(std::ostream& os,
                                          const gtirb::Symbol& sym) {

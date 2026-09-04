@@ -107,7 +107,11 @@ protected:
                         const cs_insn& inst,
                         const gtirb::Offset& offset) override;
 
+  void printHeader(std::ostream& os) override;
   void printFooter(std::ostream& os) override;
+
+  bool printSymbolReference(std::ostream& os,
+                            const gtirb::Symbol* symbol) override;
 
   void printSectionHeaderDirective(std::ostream& os,
                                    const gtirb::Section& section) override;
@@ -142,8 +146,6 @@ protected:
       const gtirb::ByteInterval::ConstSymbolicExpressionElement& SEE,
       uint64_t Size, std::optional<std::string> Type) override;
 
-  virtual void printHeader(std::ostream& /*os*/) override{};
-
   virtual void printSymbolHeader(std::ostream& os, const gtirb::Symbol& symbol);
 
   void printSymbolType(std::ostream& os, std::string& Name,
@@ -166,6 +168,8 @@ protected:
 private:
   bool TlsGdSequence = false;
   void computeFunctionAliases();
+  bool isSkippedEhFrameBeginSymbol(const gtirb::Symbol& Symbol) const;
+  const gtirb::Symbol* getSkippedEhFrameBeginSymbol() const;
 };
 
 class DEBLOAT_PRETTYPRINTER_EXPORT_API ElfPrettyPrinterFactory

@@ -75,6 +75,7 @@ void ArmPrettyPrinter::printHeader(std::ostream& os) {
   os << "# ARM " << std::endl;
   os << ".syntax unified" << std::endl;
   os << ".arch_extension sec" << std::endl;
+  ElfPrettyPrinter::printHeader(os);
 }
 
 void ArmPrettyPrinter::setDecodeMode(std::ostream& Os,

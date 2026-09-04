@@ -2,6 +2,8 @@ import gtirb
 from gtirb_helpers import (
     create_test_module,
     add_code_block,
+    add_data_block,
+    add_data_section,
     add_text_section,
     add_section,
     add_function,
@@ -12,6 +14,54 @@ from pprinter_helpers import run_asm_pprinter, PPrinterTest, asm_lines
 
 
 class PrintingPolicyTests(PPrinterTest):
+    def test_skipped_eh_frame_begin_anchor(self):
+        """References to GCC's skipped unwind anchor remain relocatable."""
+        ir, m = create_test_module(
+            file_format=gtirb.Module.FileFormat.ELF,
+            isa=gtirb.Module.ISA.X64,
+            binary_type=["EXEC"],
+        )
+        _, eh_interval = add_section(m, ".eh_frame", address=0x5000)
+        eh_block = add_data_block(eh_interval, b"\x00" * 8)
+        anchor = add_symbol(m, "__EH_FRAME_BEGIN__", eh_block)
+        add_elf_symbol_info(
+            m, anchor, 0, "OBJECT", binding="LOCAL", visibility="DEFAULT"
+        )
+
+        _, data_interval = add_data_section(m, address=0x6000)
+        add_data_block(
+            data_interval,
+            b"\x00" * 8,
+            {0: gtirb.SymAddrConst(0, anchor)},
+        )
+
+        for syntax in ("att", "intel"):
+            with self.subTest(syntax=syntax):
+                asm = run_asm_pprinter(
+                    ir, ["--syntax", syntax, "--policy", "static"]
+                )
+                lines = asm_lines(asm)
+                self.assertContains(
+                    lines,
+                    [
+                        '.pushsection .eh_frame,"a",@progbits',
+                        ".subsection 0",
+                        ".type __EH_FRAME_BEGIN__, @object",
+                        "__EH_FRAME_BEGIN__:",
+                        ".popsection",
+                    ],
+                )
+                self.assertIn(".quad __EH_FRAME_BEGIN__", lines)
+                self.assertContains(
+                    lines,
+                    [
+                        '.pushsection .eh_frame,"a",@progbits',
+                        ".subsection 1",
+                        ".long 0",
+                        ".popsection",
+                    ],
+                )
+
     def test_keep_function(self):
         ir, m = create_test_module(
             file_format=gtirb.Module.FileFormat.ELF,

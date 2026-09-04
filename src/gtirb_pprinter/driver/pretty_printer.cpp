@@ -22,6 +22,7 @@
 #endif
 #include "parser.hpp"
 #include "printing_paths.hpp"
+#include "symbolic_expression_sidecar.hpp"
 
 namespace fs = boost::filesystem;
 namespace po = boost::program_options;
@@ -128,6 +129,10 @@ int main(int argc, char** argv) {
       "with selecting modules and specifying file names");
   desc.add_options()("version", "Print version info and exit.");
   desc.add_options()("ir,i", po::value<std::string>(), "GTIRB file to print.");
+  desc.add_options()("symbolic-expression-sidecar",
+                     po::value<std::string>()->value_name("FILE"),
+                     "Restore code symbolic expressions from a gzip sidecar "
+                     "after loading the compact GTIRB file.");
   desc.add_options()(
       "asm,a", po::value<std::string>()->value_name("FILE"),
       "Print IR as assembly code to FILE. "
@@ -310,6 +315,19 @@ int main(int argc, char** argv) {
   if (!ir) {
     LOG_ERROR << "Failed to load the GTIRB data from the file.\n";
     return EXIT_FAILURE;
+  }
+  if (vm.count("symbolic-expression-sidecar")) {
+    const auto& Sidecar =
+        vm["symbolic-expression-sidecar"].as<std::string>();
+    auto Result = restoreSymbolicExpressionSidecar(ctx, *ir, Sidecar);
+    if (!Result.Success) {
+      LOG_ERROR << "Failed to restore symbolic-expression sidecar: "
+                << Result.Error << "\n";
+      return EXIT_FAILURE;
+    }
+    LOG_INFO << "Restored " << Result.Expressions
+             << " symbolic expressions and " << Result.Sizes << " sizes from "
+             << Result.Groups << " byte intervals\n";
   }
   if (ir->modules().empty()) {
     LOG_ERROR << "GTIRB file contains no modules.\n";

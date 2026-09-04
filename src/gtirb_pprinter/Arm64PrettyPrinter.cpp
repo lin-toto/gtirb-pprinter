@@ -16,6 +16,7 @@
 #include <cstring>
 #include <iostream>
 #include <sstream>
+#include <string_view>
 
 #include "Arm64PrettyPrinter.hpp"
 #include "AuxDataSchema.hpp"
@@ -50,6 +51,93 @@ bool hasArchFeature(const gtirb::Module& Module, const std::string& Feature) {
   std::string Token;
   while (Tokens >> Token) {
     if (Token == Feature) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool hasSymbolicExpression(const gtirb::CodeBlock& Block,
+                           const cs_insn& Inst) {
+  const auto* ByteInterval = Block.getByteInterval();
+  assert(ByteInterval && ByteInterval->getAddress());
+  const uint64_t Offset =
+      gtirb::Addr(Inst.address) - *ByteInterval->getAddress();
+  for (uint64_t I = 0; I < Inst.size; ++I) {
+    if (ByteInterval->getSymbolicExpression(Offset + I)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool hasIncompleteVectorLane(const cs_insn& Inst) {
+  const auto& Detail = Inst.detail->arm64;
+  for (uint8_t I = 0; I < Detail.op_count; ++I) {
+    const auto& Op = Detail.operands[I];
+    if (Op.type == ARM64_OP_REG && Op.vector_index >= 0 &&
+        Op.vas == ARM64_VAS_INVALID) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool hasOmittedPostIndex(const cs_insn& Inst) {
+  const auto& Detail = Inst.detail->arm64;
+  return Detail.writeback && Detail.op_count > 0 &&
+         Detail.operands[Detail.op_count - 1].type == ARM64_OP_MEM &&
+         std::strstr(Inst.op_str, "],") != nullptr;
+}
+
+bool hasMnemonicPrefix(const cs_insn& Inst, std::string_view Prefix) {
+  const std::string_view Mnemonic(Inst.mnemonic);
+  return Mnemonic.size() >= Prefix.size() &&
+         Mnemonic.substr(0, Prefix.size()) == Prefix;
+}
+
+bool isOptionalArchitectureInstruction(csh Handle, const cs_insn& Inst) {
+  // Capstone annotates most optional AArch64 extensions with an instruction
+  // group. Printing their exact encoding keeps reconstruction independent of
+  // the assembler's selected architecture level.
+  static const arm64_insn_group OptionalGroups[] = {
+      ARM64_GRP_CRYPTO,      ARM64_GRP_CRC,
+      ARM64_GRP_AES,         ARM64_GRP_DOTPROD,
+      ARM64_GRP_FULLFP16,    ARM64_GRP_LSE,
+      ARM64_GRP_RCPC,        ARM64_GRP_RDM,
+      ARM64_GRP_SHA2,        ARM64_GRP_SHA3,
+      ARM64_GRP_SM4,         ARM64_GRP_SVE,
+      ARM64_GRP_SVE2,        ARM64_GRP_SVE2AES,
+      ARM64_GRP_SVE2BitPerm, ARM64_GRP_SVE2SHA3,
+      ARM64_GRP_SVE2SM4,     ARM64_GRP_SME,
+      ARM64_GRP_SMEF64,      ARM64_GRP_SMEI64,
+      ARM64_GRP_MatMulFP32,  ARM64_GRP_MatMulFP64,
+      ARM64_GRP_MatMulInt8,  ARM64_GRP_V8_1A,
+      ARM64_GRP_V8_3A,       ARM64_GRP_V8_4A,
+  };
+  for (const arm64_insn_group Group : OptionalGroups) {
+    if (cs_insn_group(Handle, &Inst, Group)) {
+      return true;
+    }
+  }
+  if (cs_insn_group(Handle, &Inst, ARM64_GRP_PAC)) {
+    return true;
+  }
+
+  // Capstone 5 does not consistently attach ARM64_GRP_LSE or an MTE group.
+  // Cover the corresponding mnemonic families without enumerating aliases.
+  static const std::string_view OptionalPrefixes[] = {
+      "cas",    "ldadd", "ldclr", "ldeor", "ldset", "ldsmax",
+      "ldsmin", "ldumax", "ldumin", "stadd", "stclr", "steor",
+      "stset",  "stsmax", "stsmin", "stumax", "stumin", "swp",
+      "addg",   "gmi",    "irg",   "ldg",   "st2g",  "stg",
+      "stgm",   "stz2g",  "stzg",  "subg",  "subp",  "subps",
+      "bti",    "pac",    "aut",   "xpac",   "sha512", "eor3",
+      "rax1",
+      "xar",    "bcax",
+  };
+  for (const std::string_view Prefix : OptionalPrefixes) {
+    if (hasMnemonicPrefix(Inst, Prefix)) {
       return true;
     }
   }
@@ -153,18 +241,37 @@ void Arm64PrettyPrinter::printInstruction(std::ostream& os,
 
   if (inst.id == ARM64_INS_NOP) {
     InstructLine << "  " << syntax.nop();
-    for (uint64_t i = 1; i < inst.size; ++i) {
-      printCommentableLine(InstructLine, os, ea);
-      InstructLine.str(std::string()); // Clear
-      ea += 1;
-      os << '\n';
-      printEA(InstructLine, ea);
-      InstructLine << "  " << syntax.nop();
-    }
     printCommentableLine(InstructLine, os, ea);
     os << '\n';
     return;
-  } else if (inst.id == ARM64_INS_ADR) {
+  }
+
+  // Some optional-extension instructions are rejected under the baseline
+  // `.arch armv8-a` directive, and Capstone occasionally omits vector-lane or
+  // post-index operands from its detailed representation. When no relocation
+  // is attached, preserve those instructions exactly with `.inst` instead of
+  // emitting a mnemonic that is unsupported or semantically incomplete.
+  if (!hasSymbolicExpression(block, inst) && inst.size == 4 &&
+      (isOptionalArchitectureInstruction(this->csHandle, inst) ||
+       hasIncompleteVectorLane(inst) || hasOmittedPostIndex(inst))) {
+    uint32_t Word = 0;
+    if (module.getByteOrder() == gtirb::ByteOrder::Big) {
+      for (uint8_t I = 0; I < inst.size; ++I) {
+        Word = (Word << 8) | static_cast<uint32_t>(inst.bytes[I]);
+      }
+    } else {
+      for (uint8_t I = 0; I < inst.size; ++I) {
+        Word |= static_cast<uint32_t>(inst.bytes[I]) << (8 * I);
+      }
+    }
+    InstructLine << "  .inst 0x" << std::hex << std::setw(8)
+                 << std::setfill('0') << Word;
+    printCommentableLine(InstructLine, os, ea);
+    os << '\n';
+    return;
+  }
+
+  if (inst.id == ARM64_INS_ADR) {
     // The assembler does not allow :got: on adr instructions, but sometimes
     // it substitutes an adrp x0, :got:symbol for an adr instruction. In order
     // to print something that can be reassembled, reverse this substitution
@@ -219,6 +326,25 @@ void Arm64PrettyPrinter::printOperandList(std::ostream& os,
   cs_arm64& detail = inst.detail->arm64;
   int opCount = detail.op_count;
 
+  // Capstone 5 retains PRFM's operation in op_str, but may omit it from the
+  // detailed operand array. Recover the architectural PRFOP field from the
+  // instruction word so the emitted instruction remains assembleable.
+  bool InjectedPrefetch = false;
+  bool HasPrefetch = false;
+  for (int I = 0; I < opCount; ++I) {
+    HasPrefetch |= detail.operands[I].type == ARM64_OP_PREFETCH;
+  }
+  if (inst.id == ARM64_INS_PRFM && !HasPrefetch) {
+    assert(inst.size == 4 && "unexpected AArch64 PRFM size");
+    const uint32_t Word = static_cast<uint32_t>(inst.bytes[0]) |
+                          (static_cast<uint32_t>(inst.bytes[1]) << 8) |
+                          (static_cast<uint32_t>(inst.bytes[2]) << 16) |
+                          (static_cast<uint32_t>(inst.bytes[3]) << 24);
+    printOpPrefetch(
+        os, static_cast<arm64_prefetch_op>((Word & 0x1fU) + 1U));
+    InjectedPrefetch = true;
+  }
+
   const static std::map<arm64_insn, uint8_t> Groupings = {
       {ARM64_INS_LD1, 0},     {ARM64_INS_LD1B, 0},    {ARM64_INS_LD1D, 0},
       {ARM64_INS_LD1H, 0},    {ARM64_INS_LD1R, 0},    {ARM64_INS_LD1RB, 0},
@@ -239,7 +365,7 @@ void Arm64PrettyPrinter::printOperandList(std::ostream& os,
       {ARM64_INS_LDNF1SB, 0}, {ARM64_INS_LDNF1SH, 0}, {ARM64_INS_LDNF1SW, 0},
       {ARM64_INS_LDNF1W, 0},  {ARM64_INS_LDNT1B, 0},  {ARM64_INS_LDNT1D, 0},
       {ARM64_INS_LDNT1H, 0},  {ARM64_INS_LDNT1W, 0},  {ARM64_INS_ST1, 0},
-      {ARM64_INS_ST1, 0},     {ARM64_INS_ST1, 0},     {ARM64_INS_ST1, 0},
+      {ARM64_INS_ST2, 0},     {ARM64_INS_ST3, 0},     {ARM64_INS_ST4, 0},
       {ARM64_INS_ST1B, 0},    {ARM64_INS_ST1D, 0},    {ARM64_INS_ST1H, 0},
       {ARM64_INS_ST1W, 0},    {ARM64_INS_ST2B, 0},    {ARM64_INS_ST2D, 0},
       {ARM64_INS_ST2H, 0},    {ARM64_INS_ST2W, 0},    {ARM64_INS_ST3B, 0},
@@ -255,7 +381,7 @@ void Arm64PrettyPrinter::printOperandList(std::ostream& os,
   }
 
   for (uint8_t i = 0; i < opCount; i++) {
-    if (i != 0) {
+    if (i != 0 || InjectedPrefetch) {
       os << ',';
     }
 
@@ -463,7 +589,7 @@ void Arm64PrettyPrinter::printOpRegdirect(std::ostream& os, const cs_insn& inst,
       case ARM64_VAS_1D:
         return "d";
       case ARM64_VAS_1Q:
-        return "q";
+        return "1q";
       default:
         return "";
       }
@@ -529,20 +655,22 @@ void Arm64PrettyPrinter::printOpImmediate(
   if (const gtirb::SymAddrConst* s = this->getSymbolicImmediate(symbolic)) {
     // Handle MOVZ/MOVK with absolute address group attributes (G0-G3).
     // The #:abs_gN: prefix tells the assembler which 16-bit group of the
-    // symbol address to extract.  MOVK uses _nc (no-check) variants.
+    // symbol address to extract. GTIRB records the group but not whether the
+    // original relocation was checked. Use the no-check spelling for G0-G2
+    // so known binary addresses remain reconstructible even when rewriting
+    // separates the instructions that materialize successive groups.
     bool hasAbsGroup = s->Attributes.count(gtirb::SymAttribute::G0) ||
                        s->Attributes.count(gtirb::SymAttribute::G1) ||
                        s->Attributes.count(gtirb::SymAttribute::G2) ||
                        s->Attributes.count(gtirb::SymAttribute::G3);
 
     if (hasAbsGroup) {
-      bool isMovk = (inst.id == ARM64_INS_MOVK);
       if (s->Attributes.count(gtirb::SymAttribute::G0))
-        os << (isMovk ? "#:abs_g0_nc:" : "#:abs_g0:");
+        os << "#:abs_g0_nc:";
       else if (s->Attributes.count(gtirb::SymAttribute::G1))
-        os << (isMovk ? "#:abs_g1_nc:" : "#:abs_g1:");
+        os << "#:abs_g1_nc:";
       else if (s->Attributes.count(gtirb::SymAttribute::G2))
-        os << (isMovk ? "#:abs_g2_nc:" : "#:abs_g2:");
+        os << "#:abs_g2_nc:";
       else // G3 is always the highest group, no _nc needed.
         os << "#:abs_g3:";
       this->printSymbolicExpression(os, s, true);
@@ -778,6 +906,13 @@ void Arm64PrettyPrinter::printOpPrefetch(std::ostream& os,
     return;
   case ARM64_PRFM_INVALID:
   default:
+    // Capstone's enum names only the architecturally assigned PRFOP values,
+    // while the instruction field itself permits the full five-bit range.
+    // GNU as accepts the remaining values as an immediate operand.
+    if (prefetch > ARM64_PRFM_INVALID && prefetch <= 0x1f + 1) {
+      os << "#" << (static_cast<unsigned int>(prefetch) - 1U);
+      return;
+    }
     std::cerr << "invalid operand\n";
     exit(1);
   }

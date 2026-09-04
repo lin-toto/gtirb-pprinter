@@ -998,7 +998,14 @@ void PrettyPrinterBase::printBlockImpl(std::ostream& os, BlockType& block) {
     // than place a label in the middle).
 
     offset = programCounter - addr;
-    printOverlapWarning(os, addr);
+    // fixIntegralSymbols represents an integral symbol in the middle of an
+    // existing block with a zero-sized marker block. Such a marker has no
+    // contents to overlap and is handled losslessly by the relative symbol
+    // definition below, so do not report it as a layout conflict. Retain the
+    // warning for non-empty blocks, where bytes would genuinely overlap.
+    if (block.getSize() != 0) {
+      printOverlapWarning(os, addr);
+    }
     for (const auto& sym : module.findSymbols(block)) {
       if (!sym.getAtEnd() && !shouldSkip(policy, sym)) {
         printSymbolDefinitionRelativeToPC(os, sym, programCounter);

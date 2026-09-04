@@ -10,10 +10,73 @@ from gtirb_helpers import (
     add_text_section,
     create_test_module,
 )
-from pprinter_helpers import PPrinterTest, asm_lines, run_asm_pprinter
+from pprinter_helpers import (
+    PPrinterTest,
+    asm_lines,
+    run_asm_pprinter,
+    run_asm_pprinter_with_output,
+)
 
 
 class BlockAlignmentTest(PPrinterTest):
+    def test_integral_tls_offset_is_not_assigned_referent(self):
+        """A TLS offset that resembles a code address stays absolute."""
+        ir, m = create_test_module(
+            file_format=gtirb.Module.FileFormat.ELF, isa=gtirb.Module.ISA.X64
+        )
+        _, bi = add_text_section(m, address=0x1000)
+        tls_offset = gtirb.Symbol("tls_offset", payload=0x1001, module=m)
+        expression = gtirb.SymAddrConst(
+            0,
+            tls_offset,
+            {gtirb.SymbolicExpression.Attribute.TPOFF},
+        )
+        add_code_block(
+            bi,
+            b"\x48\xc7\xc0\x01\x10\x00\x00",
+            {3: expression},
+        )
+
+        asm = run_asm_pprinter(ir, ["--syntax", "att"])
+
+        self.assertIn("movq $tls_offset@TPOFF,%rax", asm)
+        self.assertIn(".set tls_offset, 0x1001", asm)
+        self.assertNotIn(".set tls_offset, .", asm)
+
+    def test_integral_symbol_marker_is_not_an_overlap(self):
+        """An interior integral-symbol marker has no bytes to overlap."""
+        ir, m = create_test_module(
+            file_format=gtirb.Module.FileFormat.ELF, isa=gtirb.Module.ISA.X64
+        )
+        _, bi = add_text_section(m, address=0x1000)
+        add_code_block(bi, b"\x90\xc3")
+        gtirb.Symbol("interior", payload=0x1001, module=m)
+
+        asm, output = run_asm_pprinter_with_output(
+            ir, ["--syntax", "intel"]
+        )
+
+        self.assertNotIn("found overlapping element", output)
+        self.assertNotIn("found overlapping blocks", asm)
+        self.assertIn(".set interior, . - 1", asm)
+
+    def test_nonempty_overlapping_block_still_warns(self):
+        """A block containing bytes remains a genuine overlap."""
+        ir, m = create_test_module(
+            file_format=gtirb.Module.FileFormat.ELF, isa=gtirb.Module.ISA.X64
+        )
+        _, bi = add_text_section(m, address=0x1000)
+        add_code_block(bi, b"\x90\xc3")
+        overlap = gtirb.CodeBlock(offset=1, size=1)
+        overlap.byte_interval = bi
+
+        asm, output = run_asm_pprinter_with_output(
+            ir, ["--syntax", "intel"]
+        )
+
+        self.assertIn("found overlapping element at address 1001", output)
+        self.assertIn("found overlapping blocks at address 1001", asm)
+
     def test_block_alignment_default(self):
         ir, m = create_test_module(
             file_format=gtirb.Module.FileFormat.ELF, isa=gtirb.Module.ISA.X64

@@ -146,9 +146,52 @@ void ::gtirb_layout::fixIntegralSymbols(gtirb::Context& Ctx, gtirb::Module& M) {
   // addresses later in the layout process. This also removes the need
   // for the pretty-printer to check if it needs to print a symbol every time
   // the program counter increments.
+  // An integral symbol referenced by a TLS relocation is a thread-pointer
+  // relative offset, not a virtual address in the module.  Its numeric value
+  // can nevertheless coincide with a laid-out byte interval.  Attaching such
+  // a symbol to that interval changes an absolute `.set` into a section-
+  // relative definition, which GNU as rejects when it later sees @TPOFF (and
+  // similarly corrupts the meaning of the other TLS relocation forms).
+  static const std::set<SymAttribute> TlsAttributes = {
+      SymAttribute::TLS,       SymAttribute::TLSGD,
+      SymAttribute::TLSLD,     SymAttribute::TLSLDM,
+      SymAttribute::TLSCALL,   SymAttribute::TLSDESC,
+      SymAttribute::TPREL,     SymAttribute::TPOFF,
+      SymAttribute::DTPREL,    SymAttribute::DTPOFF,
+      SymAttribute::DTPMOD,    SymAttribute::NTPOFF,
+      SymAttribute::GOTNTPOFF, SymAttribute::INDNTPOFF,
+      SymAttribute::TLSLDO,
+  };
+  std::set<Symbol*> IntegralTlsSymbols;
+  for (auto SEE : M.symbolic_expressions()) {
+    const auto& Expr = SEE.getSymbolicExpression();
+    const SymAttributeSet* Attributes = nullptr;
+    if (const auto* SAC = std::get_if<SymAddrConst>(&Expr)) {
+      Attributes = &SAC->Attributes;
+    } else if (const auto* SAA = std::get_if<SymAddrAddr>(&Expr)) {
+      Attributes = &SAA->Attributes;
+    }
+    bool IsTls = false;
+    for (SymAttribute Attribute : TlsAttributes) {
+      if (Attributes->count(Attribute)) {
+        IsTls = true;
+        break;
+      }
+    }
+    if (!IsTls)
+      continue;
+    if (const auto* SAC = std::get_if<SymAddrConst>(&Expr)) {
+      IntegralTlsSymbols.insert(SAC->Sym);
+    } else if (const auto* SAA = std::get_if<SymAddrAddr>(&Expr)) {
+      IntegralTlsSymbols.insert(SAA->Sym1);
+      IntegralTlsSymbols.insert(SAA->Sym2);
+    }
+  }
+
   std::vector<Symbol*> IntSyms;
   for (auto& Sym : M.symbols()) {
-    if (!Sym.hasReferent() && Sym.getAddress()) {
+    if (!Sym.hasReferent() && Sym.getAddress() &&
+        !IntegralTlsSymbols.count(&Sym)) {
       IntSyms.push_back(&Sym);
     }
   }

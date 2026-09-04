@@ -44,6 +44,8 @@ protected:
 
   bool hasSymbolicAddiAlias(const gtirb::CodeBlock& block,
                             const cs_insn& inst);
+  bool hasSymbolicJalrAlias(const gtirb::CodeBlock& block,
+                            const cs_insn& inst);
   bool hasSymbolicCompressedAddi(const gtirb::CodeBlock& block,
                                  const cs_insn& inst);
   bool hasSymbolicCompressedAddiw(const gtirb::CodeBlock& block,
@@ -52,12 +54,19 @@ protected:
                                      const cs_insn& inst);
   void collectTargetLabels();
   void collectLocalBranchLabels();
+  void collectRelocatedPcrelAnchors();
+  void collectInteriorCodeSymbols();
   std::string getLocalBranchLabel(gtirb::Addr Target) const;
   std::string getLongBranchSkipLabel(gtirb::Addr Address) const;
 
   void printInstruction(std::ostream& os, const gtirb::CodeBlock& block,
                         const cs_insn& inst,
                         const gtirb::Offset& offset) override;
+  void printSymbolDefinition(std::ostream& os,
+                             const gtirb::Symbol& symbol) override;
+  void printSymbolDefinitionRelativeToPC(std::ostream& os,
+                                         const gtirb::Symbol& symbol,
+                                         gtirb::Addr pc) override;
   void printSymbolicData(
       std::ostream& os,
       const gtirb::ByteInterval::ConstSymbolicExpressionElement& SEE,
@@ -109,6 +118,12 @@ protected:
 
   std::set<uint64_t> LocalBranchLabels;
   std::map<uint64_t, std::string> TargetLabels;
+  std::map<uint64_t, std::set<const gtirb::Symbol*, CmpSymPtr>>
+      InteriorCodeSymbols;
+  std::map<uint64_t, std::set<const gtirb::Symbol*, CmpSymPtr>>
+      RelocatedPcrelAnchorsByAddress;
+  std::set<const gtirb::Symbol*> RelocatedPcrelAnchors;
+  std::set<const gtirb::Symbol*> PrintedInteriorCodeSymbols;
   std::set<uint64_t> SuppressedInstructionAddresses;
 };
 

@@ -10,12 +10,15 @@
 #include "RiscvPrettyPrinter.hpp"
 #include "StringUtils.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <capstone/capstone.h>
 #include <capstone/riscv.h>
 #include <functional>
 #include <iostream>
 #include <sstream>
+#include <string_view>
+#include <vector>
 
 namespace gtirb_pprint {
 
@@ -38,6 +41,21 @@ static std::string replaceSpecialChars(const std::string& S) {
     }
   }
   return Name;
+}
+
+// RISC-V mapping symbols describe whether following bytes are instructions or
+// data; they are assembler metadata, not source-level labels.  In particular,
+// `$x<isa>` embeds an ISA string.  Renaming duplicate mapping symbols with the
+// generic `_disambig_...` suffix makes GAS parse that suffix as bogus ISA
+// extensions and produces a malformed .riscv.attributes section.  The
+// disassembler has already used these symbols to classify the input, and GAS
+// regenerates the appropriate mapping symbols for the emitted instructions,
+// so omit their definitions and never select them as branch labels.
+static bool isRiscvMappingSymbol(const gtirb::Symbol& Symbol) {
+  const std::string& Name = Symbol.getName();
+  return Name == "$x" || Name == "$d" || Name.compare(0, 3, "$x.") == 0 ||
+         Name.compare(0, 3, "$d.") == 0 ||
+         Name.compare(0, 4, "$xrv") == 0;
 }
 
 static bool isCompressedLoadStore(unsigned int Id) {
@@ -170,6 +188,36 @@ static bool isStoreConditionalOrAtomic(unsigned int Id) {
 
 static bool isCsrInstruction(const cs_insn& Inst) {
   return ascii_str_tolower(Inst.mnemonic).rfind("csr", 0) == 0;
+}
+
+// Capstone renders the floating-point rounding mode in op_str, but the
+// RISC-V detailed operand array used below omits that operand.  Reprinting only
+// the detailed operands therefore changes an explicitly encoded mode such as
+// RTZ into the assembler default (DYN).  Recover the trailing architectural
+// token from Capstone's own text and keep it separate from symbolizable
+// immediates.
+static std::optional<std::string_view>
+getTrailingRoundingMode(const cs_insn& Inst) {
+  std::string_view Operands(Inst.op_str);
+  const size_t Comma = Operands.rfind(',');
+  if (Comma == std::string_view::npos) {
+    return std::nullopt;
+  }
+
+  std::string_view Token = Operands.substr(Comma + 1);
+  const size_t Begin = Token.find_first_not_of(" \t");
+  if (Begin == std::string_view::npos) {
+    return std::nullopt;
+  }
+  Token.remove_prefix(Begin);
+  const size_t End = Token.find_last_not_of(" \t");
+  Token = Token.substr(0, End + 1);
+
+  if (Token == "rne" || Token == "rtz" || Token == "rdn" ||
+      Token == "rup" || Token == "rmm" || Token == "dyn") {
+    return Token;
+  }
+  return std::nullopt;
 }
 
 static bool isGpRegister(unsigned int Reg) {
@@ -409,8 +457,10 @@ RiscvPrettyPrinter::RiscvPrettyPrinter(gtirb::Context& context_,
       cs_open(CS_ARCH_RISCV, static_cast<cs_mode>(mode), &this->csHandle);
   assert(err == CS_ERR_OK && "Capstone failure");
 
+  collectRelocatedPcrelAnchors();
   collectTargetLabels();
   collectLocalBranchLabels();
+  collectInteriorCodeSymbols();
 }
 
 std::string RiscvPrettyPrinter::getRegisterName(unsigned int reg) const {
@@ -431,6 +481,23 @@ bool RiscvPrettyPrinter::hasSymbolicAddiAlias(
   const gtirb::SymbolicExpression* Symex =
       getInstructionSymbolicExpression(block, inst);
   return Symex != nullptr && std::get_if<gtirb::SymAddrConst>(Symex) != nullptr;
+}
+
+bool RiscvPrettyPrinter::hasSymbolicJalrAlias(
+    const gtirb::CodeBlock& block, const cs_insn& inst) {
+  const cs_riscv& Detail = inst.detail->riscv;
+  std::string Mnemonic = ascii_str_tolower(inst.mnemonic);
+
+  if ((inst.id != RISCV_INS_JALR && Mnemonic != "jalr") ||
+      Detail.op_count != 1 || Detail.operands[0].type != RISCV_OP_REG) {
+    return false;
+  }
+
+  const gtirb::SymbolicExpression* Symex =
+      getInstructionSymbolicExpression(block, inst);
+  const auto* Symaddr = std::get_if<gtirb::SymAddrConst>(Symex);
+  return Symaddr != nullptr &&
+         Symaddr->Attributes.count(gtirb::SymAttribute::LO) != 0;
 }
 
 bool RiscvPrettyPrinter::hasSymbolicCompressedAddi(
@@ -484,7 +551,9 @@ void RiscvPrettyPrinter::collectTargetLabels() {
       SymbolsByAddress;
   for (const auto& Symbol : module.symbols()) {
     auto Addr = Symbol.getAddress();
-    if (Addr && !shouldSkip(policy, Symbol)) {
+    if (Addr && !RelocatedPcrelAnchors.count(&Symbol) &&
+        !isRiscvMappingSymbol(Symbol) &&
+        !shouldSkip(policy, Symbol)) {
       SymbolsByAddress[static_cast<uint64_t>(*Addr)].insert(&Symbol);
     }
   }
@@ -494,8 +563,136 @@ void RiscvPrettyPrinter::collectTargetLabels() {
   }
 }
 
+void RiscvPrettyPrinter::collectRelocatedPcrelAnchors() {
+  struct HighRelocation {
+    const gtirb::ByteInterval* Interval;
+    uint64_t Offset;
+    uint64_t Address;
+    unsigned int Register;
+  };
+  struct LowRelocation {
+    const gtirb::ByteInterval* Interval;
+    uint64_t Offset;
+    uint64_t Address;
+    unsigned int Register;
+    const gtirb::Symbol* Anchor;
+  };
+
+  std::map<const gtirb::ByteInterval*, std::vector<HighRelocation>> Highs;
+  std::vector<LowRelocation> Lows;
+
+  auto ReadWord = [&](const gtirb::ByteInterval& Interval,
+                      uint64_t Offset) -> std::optional<uint32_t> {
+    if (Offset > Interval.getInitializedSize() ||
+        Interval.getInitializedSize() - Offset < 4) {
+      return std::nullopt;
+    }
+    const uint8_t* Bytes = Interval.rawBytes<uint8_t>();
+    uint32_t Word = 0;
+    if (module.getByteOrder() == gtirb::ByteOrder::Big) {
+      for (unsigned int I = 0; I < 4; ++I) {
+        Word = (Word << 8) | Bytes[Offset + I];
+      }
+    } else {
+      for (unsigned int I = 0; I < 4; ++I) {
+        Word |= static_cast<uint32_t>(Bytes[Offset + I]) << (8 * I);
+      }
+    }
+    return Word;
+  };
+
+  // A RISC-V %pcrel_lo relocation names a label on its paired AUIPC, not
+  // merely the beginning of the surrounding function.  A rewrite can insert
+  // bytes at that function boundary while leaving an integral/marker symbol
+  // at the old location.  Recover the architectural pair from the relocation
+  // attributes and the shared register, then emit the anchor at the AUIPC.
+  for (auto SEE : module.symbolic_expressions()) {
+    const auto* SAC =
+        std::get_if<gtirb::SymAddrConst>(&SEE.getSymbolicExpression());
+    if (!SAC || !SAC->Attributes.count(gtirb::SymAttribute::PCREL)) {
+      continue;
+    }
+    const auto* Interval = SEE.getByteInterval();
+    if (!Interval || !Interval->getAddress()) {
+      continue;
+    }
+    const uint64_t Offset = SEE.getOffset();
+    const auto Word = ReadWord(*Interval, Offset);
+    if (!Word || (*Word & 0x3) != 0x3) {
+      continue;
+    }
+    const uint64_t Address =
+        static_cast<uint64_t>(*Interval->getAddress()) + Offset;
+    if (SAC->Attributes.count(gtirb::SymAttribute::HI) &&
+        (*Word & 0x7f) == 0x17) {
+      Highs[Interval].push_back(
+          {Interval, Offset, Address, (*Word >> 7) & 0x1f});
+    } else if (SAC->Attributes.count(gtirb::SymAttribute::LO) && SAC->Sym) {
+      Lows.push_back(
+          {Interval, Offset, Address, (*Word >> 15) & 0x1f, SAC->Sym});
+    }
+  }
+
+  for (auto& [Interval, Candidates] : Highs) {
+    std::sort(Candidates.begin(), Candidates.end(),
+              [](const HighRelocation& A, const HighRelocation& B) {
+                return A.Offset < B.Offset;
+              });
+  }
+
+  std::map<const gtirb::Symbol*, uint64_t> ProposedAddresses;
+  std::set<const gtirb::Symbol*> AmbiguousAnchors;
+  for (const LowRelocation& Low : Lows) {
+    const auto AnchorAddress = Low.Anchor->getAddress();
+    if (!AnchorAddress ||
+        static_cast<uint64_t>(*AnchorAddress) > Low.Address) {
+      continue;
+    }
+    const auto It = Highs.find(Low.Interval);
+    if (It == Highs.end()) {
+      continue;
+    }
+
+    const HighRelocation* Match = nullptr;
+    for (auto Candidate = It->second.rbegin();
+         Candidate != It->second.rend(); ++Candidate) {
+      if (Candidate->Offset > Low.Offset) {
+        continue;
+      }
+      if (Candidate->Address < static_cast<uint64_t>(*AnchorAddress)) {
+        break;
+      }
+      if (Candidate->Register == Low.Register) {
+        Match = &*Candidate;
+        break;
+      }
+    }
+    if (!Match || Match->Address == static_cast<uint64_t>(*AnchorAddress)) {
+      continue;
+    }
+
+    auto [Proposal, Inserted] =
+        ProposedAddresses.emplace(Low.Anchor, Match->Address);
+    if (!Inserted && Proposal->second != Match->Address) {
+      AmbiguousAnchors.insert(Low.Anchor);
+    }
+  }
+
+  for (const auto& [Anchor, Address] : ProposedAddresses) {
+    if (AmbiguousAnchors.count(Anchor) || isRiscvMappingSymbol(*Anchor) ||
+        shouldSkip(policy, *Anchor)) {
+      continue;
+    }
+    RelocatedPcrelAnchors.insert(Anchor);
+    RelocatedPcrelAnchorsByAddress[Address].insert(Anchor);
+  }
+}
+
 void RiscvPrettyPrinter::collectLocalBranchLabels() {
   cs_option(this->csHandle, CS_OPT_DETAIL, CS_OPT_ON);
+
+  std::set<uint64_t> InstructionAddresses;
+  std::set<uint64_t> BranchTargets;
 
   for (const auto& Block : module.code_blocks()) {
     if (!Block.getAddress()) {
@@ -511,6 +708,7 @@ void RiscvPrettyPrinter::collectLocalBranchLabels() {
         Insn, [Count](cs_insn* I) { cs_free(I, Count); });
 
     for (size_t I = 0; I < Count; I++) {
+      InstructionAddresses.insert(Insn[I].address);
       if (!isPcRelativeImmediate(Insn[I].id)) {
         continue;
       }
@@ -526,11 +724,35 @@ void RiscvPrettyPrinter::collectLocalBranchLabels() {
         gtirb::Addr Target =
             Op.imm >= 0 ? Ea + static_cast<uint64_t>(Op.imm)
                         : Ea - static_cast<uint64_t>(-Op.imm);
-        if (!getTargetLabel(Target)) {
-          LocalBranchLabels.insert(static_cast<uint64_t>(Target));
-        }
+        BranchTargets.insert(static_cast<uint64_t>(Target));
       }
     }
+  }
+
+  // A relocation-free branch can still be made layout-safe when its decoded
+  // destination is an instruction that this printer will emit: define and
+  // reference a synthetic local label there.  Do not create a label for an
+  // interior/non-instruction byte, because no definition would be printed;
+  // printOpImmediate will retain that unusual fixed displacement as `.+N`.
+  for (uint64_t Target : BranchTargets) {
+    if (!getTargetLabel(gtirb::Addr(Target)) &&
+        InstructionAddresses.count(Target)) {
+      LocalBranchLabels.insert(Target);
+    }
+  }
+}
+
+void RiscvPrettyPrinter::collectInteriorCodeSymbols() {
+  for (const auto& Symbol : module.symbols()) {
+    auto* Block = Symbol.getReferent<gtirb::CodeBlock>();
+    auto Address = Symbol.getAddress();
+    if (!Block || Block->getSize() != 0 || Symbol.getAtEnd() || !Address ||
+        RelocatedPcrelAnchors.count(&Symbol) ||
+        isRiscvMappingSymbol(Symbol) || shouldSkip(policy, Symbol)) {
+      continue;
+    }
+
+    InteriorCodeSymbols[static_cast<uint64_t>(*Address)].insert(&Symbol);
   }
 }
 
@@ -556,6 +778,19 @@ void RiscvPrettyPrinter::printInstruction(std::ostream& os,
   printComments(os, offset, inst.size);
   printPrototype(os, block, offset);
   printCFIDirectives(os, offset);
+  if (auto It =
+          RelocatedPcrelAnchorsByAddress.find(static_cast<uint64_t>(ea));
+      It != RelocatedPcrelAnchorsByAddress.end()) {
+    for (const gtirb::Symbol* Symbol : It->second) {
+      ElfPrettyPrinter::printSymbolDefinition(os, *Symbol);
+    }
+  }
+  if (auto It = InteriorCodeSymbols.find(static_cast<uint64_t>(ea));
+      It != InteriorCodeSymbols.end()) {
+    for (const gtirb::Symbol* Symbol : It->second) {
+      printSymbolDefinition(os, *Symbol);
+    }
+  }
   if (LocalBranchLabels.count(static_cast<uint64_t>(ea))) {
     os << getLocalBranchLabel(ea) << ":\n";
   }
@@ -590,6 +825,8 @@ void RiscvPrettyPrinter::printInstruction(std::ostream& os,
   std::string opcode = ascii_str_tolower(inst.mnemonic);
   if (hasSymbolicAddiAlias(block, inst)) {
     opcode = "addi";
+  } else if (hasSymbolicJalrAlias(block, inst)) {
+    opcode = "jalr";
   } else if (hasSymbolicCompressedAddi(block, inst)) {
     opcode = "addi";
   } else if (hasSymbolicCompressedAddiw(block, inst)) {
@@ -616,6 +853,34 @@ void RiscvPrettyPrinter::printInstruction(std::ostream& os,
   }
   printCommentableLine(InstructLine, os, ea);
   os << '\n';
+}
+
+void RiscvPrettyPrinter::printSymbolDefinition(
+    std::ostream& os, const gtirb::Symbol& Symbol) {
+  if (isRiscvMappingSymbol(Symbol) ||
+      RelocatedPcrelAnchors.count(&Symbol)) {
+    return;
+  }
+  const auto* Block = Symbol.getReferent<gtirb::CodeBlock>();
+  if (Block && Block->getSize() == 0 && !Symbol.getAtEnd() &&
+      !PrintedInteriorCodeSymbols.insert(&Symbol).second) {
+    return;
+  }
+  ElfPrettyPrinter::printSymbolDefinition(os, Symbol);
+}
+
+void RiscvPrettyPrinter::printSymbolDefinitionRelativeToPC(
+    std::ostream& os, const gtirb::Symbol& Symbol, gtirb::Addr PC) {
+  if (isRiscvMappingSymbol(Symbol) ||
+      RelocatedPcrelAnchors.count(&Symbol)) {
+    return;
+  }
+  const auto* Block = Symbol.getReferent<gtirb::CodeBlock>();
+  if (Block && Block->getSize() == 0 && !Symbol.getAtEnd() &&
+      !PrintedInteriorCodeSymbols.insert(&Symbol).second) {
+    return;
+  }
+  ElfPrettyPrinter::printSymbolDefinitionRelativeToPC(os, Symbol, PC);
 }
 
 void RiscvPrettyPrinter::printSymbolicData(
@@ -1020,6 +1285,25 @@ void RiscvPrettyPrinter::printOperandList(std::ostream& os,
     return;
   }
 
+  if (hasSymbolicJalrAlias(block, inst)) {
+    // Capstone contracts `jalr ra,reg,0` to `jalr reg` and
+    // `jalr zero,reg,0` to `jr reg`.  A symbolic low immediate cannot be
+    // printed in either alias, so restore the expanded spelling while
+    // preserving whether the original instruction calls or tail-jumps.
+    const std::string Mnemonic = ascii_str_tolower(inst.mnemonic);
+    const unsigned int Destination =
+        Mnemonic == "jr" ? RISCV_REG_ZERO : RISCV_REG_RA;
+    os << getRegisterName(Destination) << ',';
+    printOperand(os, block, inst, 0);
+    os << ',';
+
+    const gtirb::SymbolicExpression* Symex =
+        getInstructionSymbolicExpression(block, inst);
+    const gtirb::SymAddrConst* Symaddr = this->getSymbolicImmediate(Symex);
+    this->printSymbolicExpression(os, Symaddr, true);
+    return;
+  }
+
   if (hasSymbolicAddiAlias(block, inst)) {
     printOperand(os, block, inst, 0);
     os << ',';
@@ -1094,11 +1378,31 @@ void RiscvPrettyPrinter::printOperandList(std::ostream& os,
     return;
   }
 
-  for (int i = 0; i < detail.op_count; i++) {
+  const auto RoundingMode = getTrailingRoundingMode(inst);
+  int OperandCount = detail.op_count;
+  if (RoundingMode) {
+    const std::string_view RawOperands(inst.op_str);
+    const size_t RawOperandCount =
+        1 + std::count(RawOperands.begin(), RawOperands.end(), ',');
+    // Current Capstone omits the mode from detail.  If a future version adds
+    // it as an immediate, omit that numeric rendering and still print the
+    // assembler token below.
+    if (RawOperandCount == static_cast<size_t>(OperandCount)) {
+      --OperandCount;
+    }
+  }
+
+  for (int i = 0; i < OperandCount; i++) {
     if (i != 0) {
       os << ',';
     }
     printOperand(os, block, inst, i);
+  }
+  if (RoundingMode) {
+    if (OperandCount != 0) {
+      os << ',';
+    }
+    os << *RoundingMode;
   }
 }
 

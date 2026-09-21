@@ -972,6 +972,25 @@ bool RiscvPrettyPrinter::printLongConditionalBranch(
     return false;
   }
 
+  // GAS relaxes a symbolic branch within one section after laying out that
+  // section, including compressed branches and .option norelax.  Leave such
+  // branches intact: unconditional expansion here adds a jump even to nearby
+  // targets and changes the instruction stream of an ordinary round trip.
+  // Keep the explicit long form for unresolved, forwarded, decorated, and
+  // cross-section targets, whose final displacement is not known to GAS.
+  const auto* SymAddr = std::get_if<gtirb::SymAddrConst>(
+      getInstructionSymbolicExpression(block, inst));
+  if (SymAddr && SymAddr->Sym && SymAddr->Attributes.empty() &&
+      !getForwardedSymbol(SymAddr->Sym)) {
+    const auto* Target = SymAddr->Sym->getReferent<gtirb::CodeBlock>();
+    const auto* SourceInterval = block.getByteInterval();
+    const auto* TargetInterval = Target ? Target->getByteInterval() : nullptr;
+    if (SourceInterval && TargetInterval && SourceInterval->getSection() &&
+        SourceInterval->getSection() == TargetInterval->getSection()) {
+      return false;
+    }
+  }
+
   const char* Opcode = getInvertedBranchOpcode(inst);
   if (Opcode == nullptr) {
     return false;

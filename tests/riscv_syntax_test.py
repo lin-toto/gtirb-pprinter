@@ -138,7 +138,7 @@ class RiscvInstructionsTest(PPrinterTest):
             ("ef000000", "call", "local"),
             ("6f000000", "j", "local"),
             ("01a0", "c.j", "local"),
-            ("6300b500", "j", "local"),
+            ("6300b500", "beq", "local"),
             ("ef000000", "call", "proxy"),
             ("6f000000", "tail", "proxy"),
             ("ef000000", "call", "plt"),
@@ -203,8 +203,10 @@ class RiscvInstructionsTest(PPrinterTest):
                         name = "target" if kind == "local" else "external"
                         offset = f"{addend:+d}" if addend else ""
                         suffix = "" if kind == "local" else "@plt"
+                        registers = "a0,a1," if opcode == "beq" else ""
                         self.assertRegex(
                             asm, rf"(?m)^\s*{re.escape(opcode)}\s+"
+                            + re.escape(registers)
                             + re.escape(name + offset + suffix) + r"\s*$"
                         )
                         if shutil.which("riscv64-linux-gnu-as"):
@@ -376,6 +378,115 @@ class RiscvInstructionsTest(PPrinterTest):
 
         self.assertIn("jalr zero,t0,%pcrel_lo(jump_anchor)", asm)
         self.assertNotIn("jalr ra,t0,%pcrel_lo(jump_anchor)", asm)
+
+    def test_same_section_conditional_branches_stay_native(self):
+        """Symbolic short branches must not gain a printer-inserted jump."""
+        cases = (
+            ("6300b500", "beq"), ("6310b500", "bne"),
+            ("6340b500", "blt"), ("6350b500", "bge"),
+            ("6360b500", "bltu"), ("6370b500", "bgeu"),
+            ("01c0", "c.beqz"), ("01e0", "c.bnez"),
+        )
+        for bits in (32, 64):
+            for encoded, opcode in cases:
+                for cross_section in (False, True):
+                    with self.subTest(bits=bits, opcode=opcode,
+                                      cross_section=cross_section):
+                        ir, module = create_test_module(
+                            file_format=gtirb.Module.FileFormat.ELF,
+                            isa=gtirb.Module.ISA.ValidButUnsupported,
+                        )
+                        module.aux_data["archInfo"] = gtirb.AuxData(
+                            type_name="mapping<string,string>",
+                            data={"ISA": f"RISCV{bits}"},
+                        )
+                        section, interval = add_text_section(module, address=0x1000)
+                        branch = add_code_block(interval, bytes.fromhex(encoded))
+                        if cross_section:
+                            _, target_interval = add_section(
+                                module, ".other", address=0x2000,
+                                flags=section.flags,
+                            )
+                        else:
+                            target_interval = interval
+                        target = add_code_block(
+                            target_interval, bytes.fromhex("13000000")
+                        )
+                        symbol = gtirb.Symbol("target", payload=target,
+                                              module=module)
+                        interval.symbolic_expressions[branch.offset] = (
+                            gtirb.SymAddrConst(0, symbol)
+                        )
+                        asm = run_asm_pprinter(ir)
+                        if cross_section:
+                            self.assertIn(".Lgtirb_riscv_long_branch_", asm)
+                            self.assertRegex(asm, r"(?m)^\s*j\s+target\s*$")
+                        else:
+                            self.assertNotIn(".Lgtirb_riscv_long_branch_", asm)
+                            self.assertRegex(
+                                asm, rf"(?m)^\s*{re.escape(opcode)}\s+"
+                                r"[^\n]*,target\s*$",
+                            )
+
+    def test_same_section_conditional_assembler_relaxation(self):
+        """GAS, not stale IR distance estimates, handles local branch growth."""
+        cases = (("6300b500", True), ("6310b500", False),
+                 ("01c0", True), ("01e0", False))
+        for bits in (32, 64):
+            for encoded, branch_if_equal in cases:
+                for padding in (4, 75, 4096):
+                    for backward in (False, True):
+                        for equal in (False, True):
+                            with self.subTest(bits=bits, code=encoded,
+                                              padding=padding, backward=backward,
+                                              equal=equal):
+                                ir, module = create_test_module(
+                                    file_format=gtirb.Module.FileFormat.ELF,
+                                    isa=gtirb.Module.ISA.ValidButUnsupported,
+                                )
+                                module.aux_data["archInfo"] = gtirb.AuxData(
+                                    type_name="mapping<string,string>",
+                                    data={"ISA": f"RISCV{bits}"},
+                                )
+                                _, interval = add_text_section(module, address=0x1000)
+                                init = bytes.fromhex(
+                                    "13050000 93050000 13040000" if equal else
+                                    "13050000 93051000 13041000"
+                                )
+                                entry = add_code_block(interval, init)
+                                gtirb.Symbol("_start", payload=entry, module=module)
+                                module.entry_point = entry
+                                exit3 = bytes.fromhex("13053000 9308d005 73000000")
+                                exit7 = bytes.fromhex("13057000 9308d005 73000000")
+                                if backward:
+                                    jump = add_code_block(
+                                        interval, bytes.fromhex("6f000000")
+                                    )
+                                    target = add_code_block(interval, exit7)
+                                    add_code_block(interval, bytes.fromhex("13000000") * padding)
+                                    branch = add_code_block(interval, bytes.fromhex(encoded))
+                                    add_code_block(interval, exit3)
+                                    symbol = gtirb.Symbol("branch", payload=branch,
+                                                          module=module)
+                                    interval.symbolic_expressions[jump.offset] = (
+                                        gtirb.SymAddrConst(0, symbol)
+                                    )
+                                else:
+                                    branch = add_code_block(interval, bytes.fromhex(encoded))
+                                    add_code_block(interval, exit3)
+                                    add_code_block(interval, bytes.fromhex("13000000") * padding)
+                                    target = add_code_block(interval, exit7)
+                                symbol = gtirb.Symbol("target", payload=target,
+                                                      module=module)
+                                interval.symbolic_expressions[branch.offset] = (
+                                    gtirb.SymAddrConst(0, symbol)
+                                )
+                                asm = ".option norelax\n" + run_asm_pprinter(ir)
+                                self.assertNotIn(".Lgtirb_riscv_long_branch_", asm)
+                                self.assertEqual(
+                                    self._run_static_assembly(asm, bits),
+                                    7 if equal == branch_if_equal else 3,
+                                )
 
     def test_interior_symbol_stays_at_instruction_after_branch_expansion(self):
         """A relocated interior target must not use a stale byte delta."""

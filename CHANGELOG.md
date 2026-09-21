@@ -1,5 +1,7 @@
 # 2.2.6 (Unreleased)
 
+  * Fix `KANDB`/`KANDW`/`KANDD`/`KANDQ` printing to avoid operands between {}s.
+
 # 2.2.5
 
   * Override incorrect XABORT operand size to 1 byte and print unsigned
@@ -8,6 +10,11 @@
 # 2.2.4
 
   * Update GTIRB version to 2.3.2.
+
+  * Fix incorrect ARM64 assembly output for instructions that reference a
+    single lane of a vector register (FMOV, MOV/UMOV, and DUP), where the
+    element-width suffix (e.g. `.d[1]`) was sometimes omitted, producing
+    assembly that failed to reassemble.
 
 # 2.2.3
 

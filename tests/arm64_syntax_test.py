@@ -1,4 +1,9 @@
 import gtirb
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import unittest
 
 from gtirb_helpers import add_code_block, add_text_section, create_test_module
 from pprinter_helpers import run_asm_pprinter, PPrinterTest
@@ -10,6 +15,18 @@ class Arm64InstructionsTest(PPrinterTest):
         Test printing various instructions
         """
         instructions = [
+            (b"\x60\x00\xaf\x9e", "fmov v0.d[1],x3"),
+            (b"\x03\x00\xae\x9e", "fmov x3,v0.d[1]"),
+            (b"\x20\x3c\x08\x4e", "mov x0,v1.d[0]"),
+            (b"\x20\x3c\x04\x0e", "mov w0,v1.s[0]"),
+            (b"\x20\x04\x18\x4e", "dup v0.2d,v1.d[1]"),
+            (b"\x20\x04\x08\x4e", "dup v0.2d,v1.d[0]"),
+            (b"\xCA\x00\xAE\x9E", "fmov x10,v6.d[1]"),
+            (b"\x10\x06\x08\x4E", "dup v16.2d,v16.d[0]"),
+            (b"\x10\x04\x01\x4e", "dup v16.16b,v0.b[0]"),
+            (b"\x20\x04\x04\x4e", "dup v0.4s,v1.s[0]"),
+            (b"\x20\x3c\x02\x0e", "umov w0,v1.h[0]"),
+            (b"\x20\x3c\x01\x0e", "umov w0,v1.b[0]"),
             (b"\x00\x08\x80\xD2", "mov x0,#64"),
             (b"\xE8\x0E\x04\x0E", "dup v8.2s,w23"),
             (b"\xC7\x04\x02\x4E", "dup v7.8h,v6.h[0]"),
@@ -44,9 +61,7 @@ class Arm64InstructionsTest(PPrinterTest):
         instructions = [
             (b"\x00\x48\x28\x4E", ".inst 0x4e284800"),  # AESE
             (b"\x00\xE0\xE0\x0E", ".inst 0x0ee0e000"),  # PMULL
-            (b"\xCA\x00\xAE\x9E", ".inst 0x9eae00ca"),  # FMOV lane
             (b"\xDF\x04\x18\x5E", ".inst 0x5e1804df"),  # MOV lane
-            (b"\x10\x06\x08\x4E", ".inst 0x4e080610"),  # DUP lane
             (b"\x14\x7C\x9F\x4C", ".inst 0x4c9f7c14"),  # ST1 post-index
             (b"\x01\x00\x21\xB8", ".inst 0xb8210001"),  # LDADD
             (b"\x1F\x24\x03\xD5", ".inst 0xd503241f"),  # BTI
@@ -65,6 +80,44 @@ class Arm64InstructionsTest(PPrinterTest):
 
                 asm = run_asm_pprinter(ir)
                 self.assertIn(expected, asm)
+
+    @unittest.skipUnless(shutil.which("aarch64-linux-gnu-as") and
+                         shutil.which("aarch64-linux-gnu-objcopy"),
+                         "requires AArch64 binutils")
+    def test_recovered_lanes_roundtrip_exact_bytes(self):
+        """Mnemonic recovery and the unknown-lane fallback retain all bits."""
+        instructions = [
+            "fmov v0.d[1], x3", "fmov x3, v0.d[1]",
+            "fmov v0.d[1], x29", "fmov x30, v0.d[1]",
+            "fmov v0.d[1], xzr", "fmov xzr, v0.d[1]",
+            "mov x0, v1.d[0]", "mov w0, v1.s[0]",
+            "mov wzr, v1.s[0]", "dup v0.2d, v1.d[1]",
+            "dup v16.2d, v16.d[0]", "mov d31, v6.d[1]",
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def assemble(text):
+                result = subprocess.run([
+                    "aarch64-linux-gnu-as", "-o", str(root / "code.o"),
+                ], input=text + "\n", text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                subprocess.run([
+                    "aarch64-linux-gnu-objcopy", "-O", "binary", "-j", ".text",
+                    str(root / "code.o"), str(root / "code.bin"),
+                ], check=True, capture_output=True)
+                return (root / "code.bin").read_bytes()
+
+            for instruction in instructions:
+                with self.subTest(instruction=instruction):
+                    original = assemble(instruction)
+                    ir, module = create_test_module(
+                        file_format=gtirb.Module.FileFormat.ELF,
+                        isa=gtirb.Module.ISA.ARM64,
+                    )
+                    _, interval = add_text_section(module)
+                    add_code_block(interval, original)
+                    self.assertEqual(assemble(run_asm_pprinter(ir)), original)
 
     def test_fixed_width_nop_is_printed_once(self):
         ir, m = create_test_module(

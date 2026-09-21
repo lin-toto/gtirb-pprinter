@@ -86,6 +86,27 @@ std::optional<uint64_t> getSymbolicExpressionSize(const gtirb::Offset& Offset,
   return util::getByOffset<gtirb::schema::SymbolicExpressionSizes>(Offset, Mod);
 }
 
+std::optional<uint64_t>
+getSymbolicExpressionSize(const gtirb::ByteInterval& Interval, uint64_t Offset) {
+  if (const auto* Section = Interval.getSection();
+      Section && Section->getModule()) {
+    if (auto Size = getSymbolicExpressionSize(
+            gtirb::Offset{Interval.getUUID(), Offset}, *Section->getModule())) {
+      return Size;
+    }
+  }
+
+  std::optional<uint64_t> Largest;
+  for (const auto& Block : Interval.findDataBlocksAtOffset(Offset)) {
+    uint64_t Size = Block.getSize();
+    if ((Size == 1 || Size == 2 || Size == 4 || Size == 8) &&
+        (!Largest || Size > *Largest)) {
+      Largest = Size;
+    }
+  }
+  return Largest;
+}
+
 gtirb::schema::Alignment::Type getAlignments(const gtirb::Module& Mod) {
   return util::getOrDefault<gtirb::schema::Alignment>(Mod);
 }

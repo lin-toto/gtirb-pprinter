@@ -1091,13 +1091,14 @@ void PrettyPrinterBase::printBlockContents(std::ostream& os,
     return;
   }
 
-  const auto* foundSymbolic =
-      dataObject.getByteInterval()->getSymbolicExpression(
-          dataObject.getOffset() + offset);
+  const auto Symbolic =
+      dataObject.getByteInterval()->findSymbolicExpressionsAtOffset(
+          dataObject.getOffset() + offset,
+          dataObject.getOffset() + dataObject.getSize());
   auto dataObjectBytes = dataObject.bytes<uint8_t>();
-  if (std::all_of(dataObjectBytes.begin() + offset, dataObjectBytes.end(),
-                  [](uint8_t x) { return x == 0; }) &&
-      !foundSymbolic)
+  if (Symbolic.empty() &&
+      std::all_of(dataObjectBytes.begin() + offset, dataObjectBytes.end(),
+                  [](uint8_t x) { return x == 0; }))
     printZeroDataBlock(os, dataObject, offset);
   else
     printNonZeroDataBlock(os, dataObject, offset);
@@ -1720,29 +1721,9 @@ void PrettyPrinterBase::printSection(std::ostream& os,
 
 uint64_t PrettyPrinterBase::getSymbolicExpressionSize(
     const gtirb::ByteInterval::ConstSymbolicExpressionElement& SEE) const {
-  // Check if it is present in aux data.
-  gtirb::Offset Off{SEE.getByteInterval()->getUUID(), SEE.getOffset()};
-  if (auto Size = aux_data::getSymbolicExpressionSize(Off, module)) {
+  if (auto Size = aux_data::getSymbolicExpressionSize(
+          *SEE.getByteInterval(), SEE.getOffset())) {
     return *Size;
-  }
-
-  // If not, it's the size of that largest data block at this address that is:
-  // (a) a power of 2
-  // (b) a pointer-width or smaller
-  const gtirb::DataBlock* LargestBlock = nullptr;
-  for (auto& Block :
-       SEE.getByteInterval()->findDataBlocksAtOffset(SEE.getOffset())) {
-    auto BlockSize = Block.getSize();
-    if (BlockSize != 1 && BlockSize != 2 && BlockSize != 4 && BlockSize != 8)
-      continue;
-
-    if (!LargestBlock || BlockSize > LargestBlock->getSize()) {
-      LargestBlock = &Block;
-    }
-  }
-
-  if (LargestBlock) {
-    return LargestBlock->getSize();
   }
 
   // No size found, report an error.

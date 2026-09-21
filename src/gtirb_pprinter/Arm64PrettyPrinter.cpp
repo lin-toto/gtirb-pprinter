@@ -652,7 +652,7 @@ void Arm64PrettyPrinter::printOpImmediate(
   assert(op.type == ARM64_OP_IMM &&
          "printOpImmediate called without an immediate operand");
 
-  if (const gtirb::SymAddrConst* s = this->getSymbolicImmediate(symbolic)) {
+  if (const auto* s = std::get_if<gtirb::SymAddrConst>(symbolic)) {
     // Handle MOVZ/MOVK with absolute address group attributes (G0-G3).
     // The #:abs_gN: prefix tells the assembler which 16-bit group of the
     // symbol address to extract. GTIRB records the group but not whether the
@@ -681,6 +681,8 @@ void Arm64PrettyPrinter::printOpImmediate(
       }
       this->printSymbolicExpression(os, s, !is_jump);
     }
+  } else if (const auto* sa = std::get_if<gtirb::SymAddrAddr>(symbolic)) {
+    printSymbolicExpression(os, sa, true);
   } else {
     os << "#" << op.imm;
     if (op.shift.type != ARM64_SFT_INVALID && op.shift.value != 0) {
@@ -711,12 +713,15 @@ void Arm64PrettyPrinter::printOpIndirect(
   // Displacement (constant)
   // Must always be printed if symbolic, even if disp is zero.
   const auto* s = std::get_if<gtirb::SymAddrConst>(symbolic);
-  if (op.mem.disp != 0 || s) {
+  const auto* sa = std::get_if<gtirb::SymAddrAddr>(symbolic);
+  if (op.mem.disp != 0 || s || sa) {
     if (!first) {
       os << ",";
     }
     if (s) {
       printSymbolicExpression(os, s, false);
+    } else if (sa) {
+      printSymbolicExpression(os, sa, false);
     } else {
       os << "#" << op.mem.disp;
     }

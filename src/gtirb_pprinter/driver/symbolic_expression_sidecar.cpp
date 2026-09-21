@@ -6,6 +6,7 @@
 #include <gtirb/Node.hpp>
 #include <gtirb/Symbol.hpp>
 #include <gtirb_pprinter/AuxDataSchema.hpp>
+#include <gtirb_pprinter/AuxDataUtils.hpp>
 #include <zlib.h>
 
 #include <algorithm>
@@ -14,6 +15,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -116,6 +118,48 @@ bool readAttributes(gzFile File, uint16_t Count,
   return true;
 }
 
+bool validateSize(const gtirb::ByteInterval& Interval, uint64_t Offset,
+                  std::optional<uint64_t> Size, std::string& Error) {
+  if (Offset >= Interval.getInitializedSize()) {
+    Error = "sidecar expression is outside initialized contents";
+    return false;
+  }
+  const auto Blocks = Interval.findDataBlocksOnOffset(Offset);
+  if (!Size) {
+    if (Blocks.empty()) {
+      // Instruction operands do not require symbolicExpressionSizes entries.
+      return true;
+    }
+    Error = "sidecar data expression has no determinable size";
+    return false;
+  }
+  if (*Size == 0 || *Size > Interval.getSize() - Offset ||
+      *Size > Interval.getInitializedSize() - Offset) {
+    Error = "invalid symbolic-expression sidecar size or interval extent";
+    return false;
+  }
+  bool Scalar = *Size == 1 || *Size == 2 || *Size == 4 || *Size == 8;
+  if (!Scalar && Blocks.empty()) {
+    Error = "unsupported symbolic-expression sidecar size";
+    return false;
+  }
+  for (const auto& Block : Blocks) {
+    if (*Size > Block.getSize() - (Offset - Block.getOffset())) {
+      Error = "sidecar expression extends past a data block";
+      return false;
+    }
+    auto Encoding = aux_data::getEncodingType(Block);
+    if (!Scalar &&
+        (Interval.getSection()->getModule()->getFileFormat() !=
+             gtirb::FileFormat::ELF ||
+         (Encoding != "uleb128" && Encoding != "sleb128"))) {
+      Error = "unsupported symbolic-expression sidecar size";
+      return false;
+    }
+  }
+  return true;
+}
+
 } // namespace
 
 SymbolicExpressionSidecarResult restoreSymbolicExpressionSidecar(
@@ -160,10 +204,6 @@ SymbolicExpressionSidecarResult restoreSymbolicExpressionSidecar(
     auto* Module = Interval->getSection()->getModule();
     auto* Sizes =
         Module->getAuxData<gtirb::schema::SymbolicExpressionSizes>();
-    if (!Sizes) {
-      Module->addAuxData<gtirb::schema::SymbolicExpressionSizes>({});
-      Sizes = Module->getAuxData<gtirb::schema::SymbolicExpressionSizes>();
-    }
 
     for (uint64_t Record = 0; Record < RecordCount; ++Record) {
       uint64_t Offset = 0;
@@ -186,6 +226,18 @@ SymbolicExpressionSidecarResult restoreSymbolicExpressionSidecar(
       }
       if (Interval->getSymbolicExpression(Offset)) {
         Result.Error = "sidecar would replace an existing symbolic expression";
+        return Result;
+      }
+      gtirb::Offset SizeOffset(Interval->getUUID(), Offset);
+      if (HasSize && Sizes && Sizes->count(SizeOffset)) {
+        Result.Error = "sidecar would replace an existing expression size";
+        return Result;
+      }
+      auto EffectiveSize = HasSize
+                               ? std::optional<uint64_t>(Size)
+                               : aux_data::getSymbolicExpressionSize(*Interval,
+                                                                    Offset);
+      if (!validateSize(*Interval, Offset, EffectiveSize, Result.Error)) {
         return Result;
       }
 
@@ -229,10 +281,9 @@ SymbolicExpressionSidecarResult restoreSymbolicExpressionSidecar(
       }
 
       if (HasSize) {
-        gtirb::Offset SizeOffset(Interval->getUUID(), Offset);
-        if (Sizes->count(SizeOffset)) {
-          Result.Error = "sidecar would replace an existing expression size";
-          return Result;
+        if (!Sizes) {
+          Module->addAuxData<gtirb::schema::SymbolicExpressionSizes>({});
+          Sizes = Module->getAuxData<gtirb::schema::SymbolicExpressionSizes>();
         }
         Sizes->emplace(SizeOffset, Size);
         ++Result.Sizes;

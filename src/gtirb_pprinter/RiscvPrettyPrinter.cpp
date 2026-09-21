@@ -17,6 +17,7 @@
 #include <functional>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <string_view>
 #include <vector>
 
@@ -457,7 +458,7 @@ RiscvPrettyPrinter::RiscvPrettyPrinter(gtirb::Context& context_,
       cs_open(CS_ARCH_RISCV, static_cast<cs_mode>(mode), &this->csHandle);
   assert(err == CS_ERR_OK && "Capstone failure");
 
-  collectRelocatedPcrelAnchors();
+  validatePcrelAnchors();
   collectTargetLabels();
   collectLocalBranchLabels();
   collectInteriorCodeSymbols();
@@ -551,8 +552,7 @@ void RiscvPrettyPrinter::collectTargetLabels() {
       SymbolsByAddress;
   for (const auto& Symbol : module.symbols()) {
     auto Addr = Symbol.getAddress();
-    if (Addr && !RelocatedPcrelAnchors.count(&Symbol) &&
-        !isRiscvMappingSymbol(Symbol) &&
+    if (Addr && !isRiscvMappingSymbol(Symbol) &&
         !shouldSkip(policy, Symbol)) {
       SymbolsByAddress[static_cast<uint64_t>(*Addr)].insert(&Symbol);
     }
@@ -563,128 +563,82 @@ void RiscvPrettyPrinter::collectTargetLabels() {
   }
 }
 
-void RiscvPrettyPrinter::collectRelocatedPcrelAnchors() {
-  struct HighRelocation {
-    const gtirb::ByteInterval* Interval;
-    uint64_t Offset;
-    uint64_t Address;
-    unsigned int Register;
-  };
-  struct LowRelocation {
-    const gtirb::ByteInterval* Interval;
-    uint64_t Offset;
-    uint64_t Address;
-    unsigned int Register;
-    const gtirb::Symbol* Anchor;
-  };
-
-  std::map<const gtirb::ByteInterval*, std::vector<HighRelocation>> Highs;
-  std::vector<LowRelocation> Lows;
-
-  auto ReadWord = [&](const gtirb::ByteInterval& Interval,
-                      uint64_t Offset) -> std::optional<uint32_t> {
-    if (Offset > Interval.getInitializedSize() ||
-        Interval.getInitializedSize() - Offset < 4) {
-      return std::nullopt;
+void RiscvPrettyPrinter::validatePcrelAnchors() const {
+  cs_option(this->csHandle, CS_OPT_DETAIL, CS_OPT_ON);
+  auto Decode = [&](const gtirb::ByteInterval& Interval, uint64_t Offset) {
+    cs_insn* Insn = nullptr;
+    if (Offset < Interval.getInitializedSize()) {
+      cs_disasm(this->csHandle, Interval.rawBytes<uint8_t>() + Offset,
+                Interval.getInitializedSize() - Offset, 0, 1, &Insn);
     }
-    const uint8_t* Bytes = Interval.rawBytes<uint8_t>();
-    uint32_t Word = 0;
-    if (module.getByteOrder() == gtirb::ByteOrder::Big) {
-      for (unsigned int I = 0; I < 4; ++I) {
-        Word = (Word << 8) | Bytes[Offset + I];
-      }
-    } else {
-      for (unsigned int I = 0; I < 4; ++I) {
-        Word |= static_cast<uint32_t>(Bytes[Offset + I]) << (8 * I);
-      }
-    }
-    return Word;
+    return std::unique_ptr<cs_insn, std::function<void(cs_insn*)>>(
+        Insn, [](cs_insn* I) { cs_free(I, 1); });
   };
 
-  // A RISC-V %pcrel_lo relocation names a label on its paired AUIPC, not
-  // merely the beginning of the surrounding function.  A rewrite can insert
-  // bytes at that function boundary while leaving an integral/marker symbol
-  // at the old location.  Recover the architectural pair from the relocation
-  // attributes and the shared register, then emit the anchor at the AUIPC.
+  // Pair identity belongs to the IR producer/rewriter. A nearby AUIPC using
+  // the same register may be on another CFG path and is not a valid repair.
   for (auto SEE : module.symbolic_expressions()) {
     const auto* SAC =
         std::get_if<gtirb::SymAddrConst>(&SEE.getSymbolicExpression());
-    if (!SAC || !SAC->Attributes.count(gtirb::SymAttribute::PCREL)) {
+    if (!SAC || !SAC->Attributes.count(gtirb::SymAttribute::PCREL) ||
+        !SAC->Attributes.count(gtirb::SymAttribute::LO)) {
       continue;
     }
-    const auto* Interval = SEE.getByteInterval();
-    if (!Interval || !Interval->getAddress()) {
-      continue;
+    const auto* Anchor =
+        SAC->Sym ? SAC->Sym->getReferent<gtirb::CodeBlock>() : nullptr;
+    const auto* Interval = Anchor ? Anchor->getByteInterval() : nullptr;
+    if (!Interval || SAC->Offset) {
+      throw std::runtime_error("RISC-V PC-relative LO has no instruction anchor");
     }
-    const uint64_t Offset = SEE.getOffset();
-    const auto Word = ReadWord(*Interval, Offset);
-    if (!Word || (*Word & 0x3) != 0x3) {
-      continue;
-    }
-    const uint64_t Address =
-        static_cast<uint64_t>(*Interval->getAddress()) + Offset;
-    if (SAC->Attributes.count(gtirb::SymAttribute::HI) &&
-        (*Word & 0x7f) == 0x17) {
-      Highs[Interval].push_back(
-          {Interval, Offset, Address, (*Word >> 7) & 0x1f});
-    } else if (SAC->Attributes.count(gtirb::SymAttribute::LO) && SAC->Sym) {
-      Lows.push_back(
-          {Interval, Offset, Address, (*Word >> 15) & 0x1f, SAC->Sym});
-    }
-  }
-
-  for (auto& [Interval, Candidates] : Highs) {
-    std::sort(Candidates.begin(), Candidates.end(),
-              [](const HighRelocation& A, const HighRelocation& B) {
-                return A.Offset < B.Offset;
-              });
-  }
-
-  std::map<const gtirb::Symbol*, uint64_t> ProposedAddresses;
-  std::set<const gtirb::Symbol*> AmbiguousAnchors;
-  for (const LowRelocation& Low : Lows) {
-    const auto AnchorAddress = Low.Anchor->getAddress();
-    if (!AnchorAddress ||
-        static_cast<uint64_t>(*AnchorAddress) > Low.Address) {
-      continue;
-    }
-    const auto It = Highs.find(Low.Interval);
-    if (It == Highs.end()) {
-      continue;
+    const uint64_t Offset = Anchor->getOffset() +
+                            (SAC->Sym->getAtEnd() ? Anchor->getSize() : 0);
+    const auto HighInsn = Decode(*Interval, Offset);
+    const auto* High = std::get_if<gtirb::SymAddrConst>(
+        Interval->getSymbolicExpression(Offset));
+    if (!HighInsn || HighInsn->id != RISCV_INS_AUIPC || !High ||
+        !((High->Attributes.count(gtirb::SymAttribute::HI) &&
+           High->Attributes.count(gtirb::SymAttribute::PCREL)) ||
+          High->Attributes.count(gtirb::SymAttribute::GOT) ||
+          High->Attributes.count(gtirb::SymAttribute::TLSGD))) {
+      throw std::runtime_error("RISC-V PC-relative LO has a stale AUIPC anchor: " +
+                               SAC->Sym->getName());
     }
 
-    const HighRelocation* Match = nullptr;
-    for (auto Candidate = It->second.rbegin();
-         Candidate != It->second.rend(); ++Candidate) {
-      if (Candidate->Offset > Low.Offset) {
-        continue;
+    const auto LowInsn = Decode(*SEE.getByteInterval(), SEE.getOffset());
+    unsigned int Source = RISCV_REG_INVALID;
+    if (LowInsn) {
+      const cs_riscv& Detail = LowInsn->detail->riscv;
+      for (unsigned int I = 0; I < Detail.op_count; ++I) {
+        if (Detail.operands[I].type == RISCV_OP_MEM) {
+          Source = Detail.operands[I].mem.base;
+        }
       }
-      if (Candidate->Address < static_cast<uint64_t>(*AnchorAddress)) {
-        break;
-      }
-      if (Candidate->Register == Low.Register) {
-        Match = &*Candidate;
-        break;
+      if (hasCompressedMemoryOperand(*LowInsn)) {
+        Source = Detail.operands[2].reg;
+      } else if ((LowInsn->id == RISCV_INS_C_ADDI ||
+                  LowInsn->id == RISCV_INS_C_ADDIW) &&
+                 Detail.op_count == 2 && Detail.operands[0].type == RISCV_OP_REG) {
+        Source = Detail.operands[0].reg;
+      } else if (LowInsn->id == RISCV_INS_ADDI ||
+                 LowInsn->id == RISCV_INS_ADDIW ||
+                 LowInsn->id == RISCV_INS_JALR) {
+        // Capstone aliases mv/jalr/jr omit a zero immediate and sometimes rd.
+        unsigned int Index = Detail.op_count == 1 ? 0 : 1;
+        if (Detail.op_count > Index && Detail.operands[Index].type == RISCV_OP_REG) {
+          Source = Detail.operands[Index].reg;
+        }
       }
     }
-    if (!Match || Match->Address == static_cast<uint64_t>(*AnchorAddress)) {
-      continue;
+    if (Source == RISCV_REG_INVALID) {
+      throw std::runtime_error("RISC-V PC-relative LO has an unsupported instruction: " +
+                               SAC->Sym->getName());
     }
-
-    auto [Proposal, Inserted] =
-        ProposedAddresses.emplace(Low.Anchor, Match->Address);
-    if (!Inserted && Proposal->second != Match->Address) {
-      AmbiguousAnchors.insert(Low.Anchor);
+    const cs_riscv& HighDetail = HighInsn->detail->riscv;
+    if (HighDetail.op_count < 1 || HighDetail.operands[0].type != RISCV_OP_REG ||
+        Source != HighDetail.operands[0].reg || Source == RISCV_REG_ZERO) {
+      throw std::runtime_error("RISC-V PC-relative LO source register does not match AUIPC: " +
+                               SAC->Sym->getName());
     }
-  }
-
-  for (const auto& [Anchor, Address] : ProposedAddresses) {
-    if (AmbiguousAnchors.count(Anchor) || isRiscvMappingSymbol(*Anchor) ||
-        shouldSkip(policy, *Anchor)) {
-      continue;
-    }
-    RelocatedPcrelAnchors.insert(Anchor);
-    RelocatedPcrelAnchorsByAddress[Address].insert(Anchor);
   }
 }
 
@@ -747,7 +701,6 @@ void RiscvPrettyPrinter::collectInteriorCodeSymbols() {
     auto* Block = Symbol.getReferent<gtirb::CodeBlock>();
     auto Address = Symbol.getAddress();
     if (!Block || Block->getSize() != 0 || Symbol.getAtEnd() || !Address ||
-        RelocatedPcrelAnchors.count(&Symbol) ||
         isRiscvMappingSymbol(Symbol) || shouldSkip(policy, Symbol)) {
       continue;
     }
@@ -778,17 +731,12 @@ void RiscvPrettyPrinter::printInstruction(std::ostream& os,
   printComments(os, offset, inst.size);
   printPrototype(os, block, offset);
   printCFIDirectives(os, offset);
-  if (auto It =
-          RelocatedPcrelAnchorsByAddress.find(static_cast<uint64_t>(ea));
-      It != RelocatedPcrelAnchorsByAddress.end()) {
-    for (const gtirb::Symbol* Symbol : It->second) {
-      ElfPrettyPrinter::printSymbolDefinition(os, *Symbol);
-    }
-  }
   if (auto It = InteriorCodeSymbols.find(static_cast<uint64_t>(ea));
       It != InteriorCodeSymbols.end()) {
     for (const gtirb::Symbol* Symbol : It->second) {
-      printSymbolDefinition(os, *Symbol);
+      if (PrintedInteriorCodeSymbols.insert(Symbol).second) {
+        ElfPrettyPrinter::printSymbolDefinition(os, *Symbol);
+      }
     }
   }
   if (LocalBranchLabels.count(static_cast<uint64_t>(ea))) {
@@ -857,22 +805,30 @@ void RiscvPrettyPrinter::printInstruction(std::ostream& os,
 
 void RiscvPrettyPrinter::printSymbolDefinition(
     std::ostream& os, const gtirb::Symbol& Symbol) {
-  if (isRiscvMappingSymbol(Symbol) ||
-      RelocatedPcrelAnchors.count(&Symbol)) {
+  if (isRiscvMappingSymbol(Symbol)) {
     return;
   }
   const auto* Block = Symbol.getReferent<gtirb::CodeBlock>();
-  if (Block && Block->getSize() == 0 && !Symbol.getAtEnd() &&
-      !PrintedInteriorCodeSymbols.insert(&Symbol).second) {
-    return;
+  if (Block && Block->getSize() == 0 && !Symbol.getAtEnd()) {
+    // A marker may sort before the code block at the same address. Its
+    // label must follow that block's alignment, at instruction emission.
+    if (auto Address = Block->getAddress()) {
+      for (const auto& Code : module.findCodeBlocksAt(*Address)) {
+        if (Code.getSize() && !shouldSkip(policy, Code)) {
+          return;
+        }
+      }
+    }
+    if (!PrintedInteriorCodeSymbols.insert(&Symbol).second) {
+      return;
+    }
   }
   ElfPrettyPrinter::printSymbolDefinition(os, Symbol);
 }
 
 void RiscvPrettyPrinter::printSymbolDefinitionRelativeToPC(
     std::ostream& os, const gtirb::Symbol& Symbol, gtirb::Addr PC) {
-  if (isRiscvMappingSymbol(Symbol) ||
-      RelocatedPcrelAnchors.count(&Symbol)) {
+  if (isRiscvMappingSymbol(Symbol)) {
     return;
   }
   const auto* Block = Symbol.getReferent<gtirb::CodeBlock>();
@@ -881,30 +837,6 @@ void RiscvPrettyPrinter::printSymbolDefinitionRelativeToPC(
     return;
   }
   ElfPrettyPrinter::printSymbolDefinitionRelativeToPC(os, Symbol, PC);
-}
-
-void RiscvPrettyPrinter::printSymbolicData(
-    std::ostream& os,
-    const gtirb::ByteInterval::ConstSymbolicExpressionElement& SEE,
-    uint64_t Size, std::optional<std::string> Type) {
-  if ((Type && (*Type == "uleb128" || *Type == "sleb128")) &&
-      std::get_if<gtirb::SymAddrAddr>(&SEE.getSymbolicExpression())) {
-    auto Bytes = SEE.getByteInterval()->rawBytes<uint8_t>();
-    auto Offset = SEE.getOffset();
-
-    os << syntax.byteData() << ' ';
-    std::ios_base::fmtflags Flags = os.flags();
-    for (uint64_t I = 0; I < Size; I++) {
-      if (I != 0) {
-        os << ", ";
-      }
-      os << "0x" << std::hex << static_cast<uint32_t>(Bytes[Offset + I]);
-    }
-    os.flags(Flags);
-    return;
-  }
-
-  PrettyPrinterBase::printSymbolicData(os, SEE, Size, Type);
 }
 
 const gtirb::Symbol* RiscvPrettyPrinter::getGpRelativeCopyRelocationSymbol(
@@ -1120,7 +1052,7 @@ bool RiscvPrettyPrinter::isPltTailCall(const cs_insn& inst) const {
 
 std::optional<std::string>
 RiscvPrettyPrinter::getPltTargetName(const gtirb::CodeBlock& block,
-                                     const cs_insn& inst) const {
+                                     const cs_insn& inst) {
   gtirb::Addr Ea(inst.address);
   const gtirb::SymbolicExpression* Symex =
       block.getByteInterval()->getSymbolicExpression(
@@ -1140,15 +1072,15 @@ RiscvPrettyPrinter::getPltTargetName(const gtirb::CodeBlock& block,
     return std::nullopt;
   }
 
-  if (auto* Target = getForwardedSymbol(SymAddr->Sym)) {
-    return getSymbolName(*Target);
+  if (getForwardedSymbol(SymAddr->Sym)) {
+    return getDirectRelocationTargetName(block, inst);
   }
 
   return std::nullopt;
 }
 
 std::optional<std::string> RiscvPrettyPrinter::getDirectRelocationTargetName(
-    const gtirb::CodeBlock& block, const cs_insn& inst) const {
+    const gtirb::CodeBlock& block, const cs_insn& inst) {
   const gtirb::SymbolicExpression* Symex =
       getInstructionSymbolicExpression(block, inst);
   const auto* SymAddr = std::get_if<gtirb::SymAddrConst>(Symex);
@@ -1156,30 +1088,28 @@ std::optional<std::string> RiscvPrettyPrinter::getDirectRelocationTargetName(
     return std::nullopt;
   }
 
-  if (SymAddr->Sym->getReferent<gtirb::ProxyBlock>()) {
-    return getSymbolName(*SymAddr->Sym) + "@plt";
+  gtirb::SymAddrConst Expression = *SymAddr;
+  if (Expression.Sym->getReferent<gtirb::ProxyBlock>()) {
+    Expression.Attributes.insert(gtirb::SymAttribute::PLT);
   }
 
   if (const auto* Block = SymAddr->Sym->getReferent<gtirb::CodeBlock>()) {
     if (Block->getByteInterval() && Block->getByteInterval()->getSection() &&
         isPltSectionName(Block->getByteInterval()->getSection()->getName())) {
       if (auto* Target = getForwardedSymbol(SymAddr->Sym)) {
-        return getSymbolName(*Target) + "@plt";
+        Expression.Sym = Target;
       }
-      return getSymbolName(*SymAddr->Sym) + "@plt";
+      Expression.Attributes.insert(gtirb::SymAttribute::PLT);
     }
   }
 
   std::stringstream Target;
-  Target << getSymbolName(*SymAddr->Sym);
-  if (SymAddr->Attributes.count(gtirb::SymAttribute::PLT)) {
-    Target << "@plt";
-  }
+  printSymbolicExpression(Target, &Expression, false);
   return Target.str();
 }
 
 std::optional<std::string> RiscvPrettyPrinter::getPltRelocationTargetName(
-    const gtirb::CodeBlock& block, const cs_insn& inst) const {
+    const gtirb::CodeBlock& block, const cs_insn& inst) {
   const gtirb::SymbolicExpression* Symex =
       getInstructionSymbolicExpression(block, inst);
   const auto* SymAddr = std::get_if<gtirb::SymAddrConst>(Symex);
@@ -1188,7 +1118,7 @@ std::optional<std::string> RiscvPrettyPrinter::getPltRelocationTargetName(
     return std::nullopt;
   }
 
-  return getSymbolName(*SymAddr->Sym);
+  return getDirectRelocationTargetName(block, inst);
 }
 
 bool RiscvPrettyPrinter::printPltCall(std::ostream& os,
@@ -1211,7 +1141,7 @@ bool RiscvPrettyPrinter::printPltCall(std::ostream& os,
 
   std::stringstream Line;
   printEA(Line, Address);
-  Line << "  " << Opcode << ' ' << *Target << "@plt";
+  Line << "  " << Opcode << ' ' << *Target;
   printCommentableLine(Line, os, Address);
   os << '\n';
   return true;
@@ -1230,12 +1160,20 @@ bool RiscvPrettyPrinter::printDirectCallRelocation(
     return false;
   }
 
+  if (IsTailCall) {
+    const auto* SymAddr = std::get_if<gtirb::SymAddrConst>(
+        getInstructionSymbolicExpression(block, inst));
+    // Expanding a jump to `tail` clobbers t1. A local symbol name does not
+    // establish the external call boundary needed to permit that clobber.
+    if (!SymAddr || !SymAddr->Sym ||
+        (!SymAddr->Attributes.count(gtirb::SymAttribute::PLT) &&
+         !SymAddr->Sym->getReferent<gtirb::ProxyBlock>())) {
+      return false;
+    }
+  }
+
   auto Target = getDirectRelocationTargetName(block, inst);
   if (!Target) {
-    return false;
-  }
-  if (IsTailCall && Target->find("@plt") == std::string::npos &&
-      Target->rfind(".L", 0) == 0) {
     return false;
   }
 
@@ -1267,7 +1205,7 @@ bool RiscvPrettyPrinter::printPltCallRelocation(
 
   std::stringstream Line;
   printEA(Line, Address);
-  Line << "  call " << *Target << "@plt";
+  Line << "  call " << *Target;
   printCommentableLine(Line, os, Address);
   os << '\n';
 

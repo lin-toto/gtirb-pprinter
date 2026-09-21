@@ -117,7 +117,7 @@ getInterpreterName(const gtirb::Module& Module) {
   return std::nullopt;
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
   gtirb_layout::registerAuxDataTypes();
   gtirb_pprint::registerAuxDataTypes();
   gtirb_pprint::registerPrettyPrinters();
@@ -663,4 +663,7 @@ int main(int argc, char** argv) {
     }
   }
   return EXIT_SUCCESS;
+} catch (const std::exception& Error) {
+  LOG_ERROR << Error.what() << '\n';
+  return EXIT_FAILURE;
 }

@@ -46,6 +46,21 @@ Use the following options to configure cmake:
 The ELF pretty printer supports the `arm`, `arm64`, `att`, `intel`, `masm`,
 `mips32`, and `riscv` assembly syntaxes. RISC-V printing expects the frontend to
 preserve RISC-V relocation metadata such as `%pcrel_hi`/`%pcrel_lo` pairs.
+Each low relocation must name its actual AUIPC instruction. Rewriters must
+preserve that instruction identity when inserting entry code; the printer
+rejects stale anchors instead of guessing a nearby same-register AUIPC.
+It also checks that the low instruction's source/base register matches the
+AUIPC destination, including compressed operands. This is a metadata consistency
+check, not reaching-definition analysis. Invalid pairs produce a diagnostic and
+a nonzero driver exit rather than an uncaught-exception abort.
+Instruction-anchor symbols must not be forwarded to external functions.
+Zero-sized instruction markers are emitted with the instruction, after any
+alignment on a code block starting at that address.
+Direct-transfer expressions retain their addends, including calls expanded to
+AUIPC/JALR and calls forwarded through PLT symbols.
+Ordinary direct jumps retain their register-preserving form regardless of the
+target symbol's name. Rewriters must handle jumps that grow out of range;
+the printer does not invent a scratch-register clobber for a local jump.
 
 Once the dependencies are installed, you can configure and build as follows:
 
@@ -61,6 +76,12 @@ See the [GTIRB readme](https://github.com/GrammaTech/gtirb/#installing).
 ## Usage
 
 ### Generate reassembleable assembly code
+
+x86 implicit memory-string instructions (MOVS/STOS/LODS/CMPS/SCAS) retain their
+original bytes in ELF output.
+This preserves REP, address-size and segment prefixes that may be lost by the
+decoder or operand-free assembly spelling; these instructions contain no
+encoded address operands requiring relocation.
 Pretty print the GTIRB for a simple hello world executable to an
 assembly file named `hello.S`, assemble this file with the GNU
 assembler to an object file named `hello.o`, and link this object file
@@ -103,6 +124,24 @@ gtirb-pprinter hello.gtirb --binary hello --dummy-so=yes
 ```
 
 ## AuxData Used by the Pretty Printer
+
+ELF layout honors `elfSymbolInfo` entries with section index `SHN_ABS`.
+Unmapped inferred local values without section provenance are recorded as
+absolute before relayout, so repeated layouts cannot bind them to synthetic
+addresses. Real section indices and external bindings remain unchanged.
+
+The optional `--symbolic-expression-sidecar` loader validates expression sizes
+and initialized interval/data-block extents before adding each record. Scalar
+widths are 1, 2, 4 or 8 bytes; ELF LEB128 encodings may use other positive widths.
+Absent sizes retain the normal data-block inference and code-operand behavior.
+An invalid sidecar terminates the driver before output files are generated.
+
+Symbolic ELF LEB128 fields retain their expressions rather than the original
+encoded bytes. On RISC-V, unsigned differences require assembler/linker support
+for ULEB128 relocations when code can relax. Signed differences may require
+fixed assembly-time layout (tested with LLVM 19 and `.option norelax` covering
+the referenced code). Unsupported expressions must fail assembly, not silently
+reuse stale values; disabling relaxation only at link time is insufficient.
 
 Generating assembly depends on a number of additional pieces of information
 beyond the symbols and instruction/data bytes in the IR. The pretty printer

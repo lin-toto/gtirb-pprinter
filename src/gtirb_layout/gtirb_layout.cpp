@@ -14,6 +14,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "gtirb_layout.hpp"
+#include "gtirb_pprinter/AuxDataSchema.hpp"
 #include <gtirb/gtirb.hpp>
 #include <set>
 
@@ -23,6 +24,7 @@ using namespace gtirb_layout;
 void ::gtirb_layout::registerAuxDataTypes() {
   using namespace gtirb::schema;
   gtirb::AuxDataContainer::registerAuxDataType<Alignment>();
+  gtirb::AuxDataContainer::registerAuxDataType<ElfSymbolInfo>();
 }
 
 /// Return the CFG containing the given block.
@@ -140,6 +142,12 @@ bool ::gtirb_layout::layoutRequired(IR& Ir) {
 #endif
 
 void ::gtirb_layout::fixIntegralSymbols(gtirb::Context& Ctx, gtirb::Module& M) {
+  constexpr uint64_t ShnAbs = 0xfff1;
+  auto* SymbolInfo = M.getAuxData<schema::ElfSymbolInfo>();
+  if (!SymbolInfo && M.getFileFormat() == FileFormat::ELF) {
+    M.addAuxData<schema::ElfSymbolInfo>({});
+    SymbolInfo = M.getAuxData<schema::ElfSymbolInfo>();
+  }
   // In general, we want as many integral symbols to not be integral as
   // possible. If they point to blocks, even 0-length ones, instead of raw
   // addresses, then they automatically get moved around when we adjust
@@ -190,6 +198,11 @@ void ::gtirb_layout::fixIntegralSymbols(gtirb::Context& Ctx, gtirb::Module& M) {
 
   std::vector<Symbol*> IntSyms;
   for (auto& Sym : M.symbols()) {
+    if (SymbolInfo) {
+      auto It = SymbolInfo->find(Sym.getUUID());
+      if (It != SymbolInfo->end() && std::get<4>(It->second) == ShnAbs)
+        continue;
+    }
     if (!Sym.hasReferent() && Sym.getAddress() &&
         !IntegralTlsSymbols.count(&Sym)) {
       IntSyms.push_back(&Sym);
@@ -264,8 +277,15 @@ void ::gtirb_layout::fixIntegralSymbols(gtirb::Context& Ctx, gtirb::Module& M) {
       break;
     }
 
-    // TODO: if !FoundReferent, then emit a warning that an integral symbol
-    // was not relocated.
+    // An inferred local value without section provenance must not become a
+    // label in a later synthetic layout. Preserve real section indices and
+    // undefined external bindings, even when they lie outside byte extents.
+    if (!FoundReferent && SymbolInfo) {
+      auto [It, Inserted] = SymbolInfo->try_emplace(
+          Sym->getUUID(), 0, "NOTYPE", "LOCAL", "DEFAULT", ShnAbs);
+      if (std::get<4>(It->second) == 0 && std::get<2>(It->second) == "LOCAL")
+        std::get<4>(It->second) = ShnAbs;
+    }
   }
 }
 

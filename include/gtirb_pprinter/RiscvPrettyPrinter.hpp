@@ -54,7 +54,7 @@ protected:
                                      const cs_insn& inst);
   void collectTargetLabels();
   void collectLocalBranchLabels();
-  void collectRelocatedPcrelAnchors();
+  void validatePcrelAnchors() const;
   void collectInteriorCodeSymbols();
   std::string getLocalBranchLabel(gtirb::Addr Target) const;
   std::string getLongBranchSkipLabel(gtirb::Addr Address) const;
@@ -67,10 +67,6 @@ protected:
   void printSymbolDefinitionRelativeToPC(std::ostream& os,
                                          const gtirb::Symbol& symbol,
                                          gtirb::Addr pc) override;
-  void printSymbolicData(
-      std::ostream& os,
-      const gtirb::ByteInterval::ConstSymbolicExpressionElement& SEE,
-      uint64_t Size, std::optional<std::string> Type) override;
   bool printGpRelativeCopyRelocation(std::ostream& os,
                                      const gtirb::CodeBlock& block,
                                      const cs_insn& inst, gtirb::Addr Address);
@@ -89,11 +85,11 @@ protected:
   bool printPltCallRelocation(std::ostream& os, const gtirb::CodeBlock& block,
                               const cs_insn& inst, gtirb::Addr Address);
   std::optional<std::string>
-  getPltTargetName(const gtirb::CodeBlock& block, const cs_insn& inst) const;
+  getPltTargetName(const gtirb::CodeBlock& block, const cs_insn& inst);
   std::optional<std::string> getDirectRelocationTargetName(
-      const gtirb::CodeBlock& block, const cs_insn& inst) const;
+      const gtirb::CodeBlock& block, const cs_insn& inst);
   std::optional<std::string> getPltRelocationTargetName(
-      const gtirb::CodeBlock& block, const cs_insn& inst) const;
+      const gtirb::CodeBlock& block, const cs_insn& inst);
   bool isPltCall(const cs_insn& inst) const;
   bool isPltTailCall(const cs_insn& inst) const;
   void printOperandList(std::ostream& os, const gtirb::CodeBlock& block,
@@ -120,9 +116,6 @@ protected:
   std::map<uint64_t, std::string> TargetLabels;
   std::map<uint64_t, std::set<const gtirb::Symbol*, CmpSymPtr>>
       InteriorCodeSymbols;
-  std::map<uint64_t, std::set<const gtirb::Symbol*, CmpSymPtr>>
-      RelocatedPcrelAnchorsByAddress;
-  std::set<const gtirb::Symbol*> RelocatedPcrelAnchors;
   std::set<const gtirb::Symbol*> PrintedInteriorCodeSymbols;
   std::set<uint64_t> SuppressedInstructionAddresses;
 };

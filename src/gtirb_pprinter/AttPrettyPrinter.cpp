@@ -49,8 +49,8 @@ void AttPrettyPrinter::fixupInstruction(const gtirb::CodeBlock& block,
   case X86_INS_ROR:
   case X86_INS_RCL:
   case X86_INS_RCR:
-    if (Detail.op_count == 1) {
-      // Check if %cl is a source register
+    {
+      // Check if %cl is a source register.
       cs_regs RegsRead, RegsWrite;
       uint8_t RegsReadCount, RegsWriteCount;
       if (cs_regs_access(this->csHandle, &Insn, RegsRead, &RegsReadCount,
@@ -58,15 +58,28 @@ void AttPrettyPrinter::fixupInstruction(const gtirb::CodeBlock& block,
         assert(!"cs_regs_access failed");
       }
 
+      bool ReadsCl = Detail.opcode[0] == 0xD3;
       for (uint8_t i = 0; i < RegsReadCount; i++) {
         if (RegsRead[i] == X86_REG_CL) {
-          // Add the %cl register as the source operand.
-          Detail.operands[1] = Detail.operands[0];
-          Detail.operands[0].type = X86_OP_REG;
-          Detail.operands[0].reg = X86_REG_CL;
-          Detail.op_count = 2;
+          ReadsCl = true;
           break;
         }
+      }
+
+      // Some Capstone releases decode D3 RCL as destination,$1 instead of
+      // %cl,destination. D3 unambiguously selects the CL-count form.
+      bool HasClOperand =
+          Detail.op_count >= 1 && Detail.operands[0].type == X86_OP_REG &&
+          Detail.operands[0].reg == X86_REG_CL;
+      bool HasSpuriousOne =
+          Detail.op_count == 2 && Detail.operands[1].type == X86_OP_IMM;
+      if (ReadsCl && !HasClOperand &&
+          (Detail.op_count == 1 || HasSpuriousOne)) {
+        // Add the %cl register as the source operand.
+        Detail.operands[1] = Detail.operands[0];
+        Detail.operands[0].type = X86_OP_REG;
+        Detail.operands[0].reg = X86_REG_CL;
+        Detail.op_count = 2;
       }
     }
   }

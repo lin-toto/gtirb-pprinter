@@ -4,7 +4,7 @@ include_directories(${GTEST_INCLUDE_DIRS})
 
 set(${PROJECT_NAME}_H)
 
-set(${PROJECT_NAME}_SRC layout_test.cpp)
+set(${PROJECT_NAME}_SRC layout_test.cpp absolute_symbols_test.cpp)
 
 if(UNIX AND NOT WIN32)
   set(SYSLIBS dl)

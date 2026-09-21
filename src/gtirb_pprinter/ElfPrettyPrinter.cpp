@@ -175,20 +175,33 @@ void ElfPrettyPrinter::printInstruction(std::ostream& os,
     return;
   }
 
+  // String instructions have only implicit operands. Capstone can omit REP
+  // prefixes, and the operand-free MOVS spelling loses address-size/segment
+  // overrides. There are no encoded addresses to relocate, so keep their bytes.
+  bool IsString = false;
+  if (module.getISA() == gtirb::ISA::X64 ||
+      module.getISA() == gtirb::ISA::IA32) {
+    const uint8_t Opcode = inst.detail->x86.opcode[0];
+    IsString = (Opcode >= 0xa4 && Opcode <= 0xa7) ||
+               (Opcode >= 0xaa && Opcode <= 0xaf);
+  }
+
   // GNU as versions accepted by this project do not consistently recognize
   // the operand-free INT1 mnemonic.  Printing INT1/INT3 as `int $N` is not a
   // safe substitute: that form is two bytes, while the native opcodes are one
   // byte.  Emit their exact bytes so later addresses remain unchanged.
-  if (inst.id == X86_INS_INT1 || inst.id == X86_INS_INT3) {
+  if (IsString || inst.id == X86_INS_INT1 || inst.id == X86_INS_INT3) {
     printComments(os, offset, inst.size);
     printPrototype(os, block, offset);
     printCFIDirectives(os, offset);
 
-    std::stringstream Line;
-    printEA(Line, gtirb::Addr(inst.address));
-    printByte(Line, static_cast<std::byte>(inst.bytes[0]));
-    printCommentableLine(Line, os, gtirb::Addr(inst.address));
-    os << '\n';
+    for (uint8_t I = 0; I < inst.size; ++I) {
+      std::stringstream Line;
+      printEA(Line, gtirb::Addr(inst.address + I));
+      printByte(Line, static_cast<std::byte>(inst.bytes[I]));
+      printCommentableLine(Line, os, gtirb::Addr(inst.address + I));
+      os << '\n';
+    }
     return;
   }
 

@@ -178,6 +178,11 @@ std::map<gtirb::UUID, gtirb::UUID> getFunctionNames(const gtirb::Module& Mod);
 std::optional<uint64_t> getSymbolicExpressionSize(const gtirb::Offset& Offset,
                                                   const gtirb::Module& Mod);
 
+// Use an explicit size when present, otherwise infer it from scalar data
+// blocks starting at the expression offset.
+std::optional<uint64_t>
+getSymbolicExpressionSize(const gtirb::ByteInterval& Interval, uint64_t Offset);
+
 // Load all alignment entries from the `alignment' AuxData table.
 std::map<gtirb::UUID, uint64_t> getAlignments(const gtirb::Module& Mod);
 

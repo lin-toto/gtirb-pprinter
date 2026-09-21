@@ -802,11 +802,23 @@ void PrettyPrinterBase::printInstruction(std::ostream& os,
        inst.id == X86_INS_NOP) ||
       (module.getISA() == gtirb::ISA::ARM64 && inst.id == ARM64_INS_NOP);
   if (IsNop) {
+    // Replacing a multi-byte x86 NOP with several one-byte NOPs keeps its
+    // size but changes instruction boundaries and counts on a fresh lift.
+    // Preserve its complete encoding, including ignored prefixes/operands;
+    // printing the mnemonic alone can let the assembler shorten it instead.
+    const bool PreserveEncoding =
+        (module.getISA() == gtirb::ISA::X64 ||
+         module.getISA() == gtirb::ISA::IA32) && inst.size > 1;
     uint64_t i = 0;
     do {
       std::stringstream InstructLine;
       printEA(InstructLine, ea);
-      InstructLine << "  " << syntax.nop();
+      InstructLine << "  ";
+      if (PreserveEncoding) {
+        printByte(InstructLine, static_cast<std::byte>(inst.bytes[i]));
+      } else {
+        InstructLine << syntax.nop();
+      }
       printCommentableLine(InstructLine, os, ea);
       os << '\n';
       ea += 1;

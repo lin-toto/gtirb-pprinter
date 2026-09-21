@@ -599,13 +599,18 @@ int main(int argc, char** argv) try {
       }
       std::ofstream ofs(name);
       if (ofs) {
-        if (pp.print(ofs, ctx, M)) {
-          LOG_INFO << "Assembly for module " << M.getName()
-                   << " written to: " << name << "\n";
+        // PrettyPrinter::print returns zero on success, not a stream boolean.
+        // Never report success (or proceed to another output) after rejection.
+        if (pp.print(ofs, ctx, M) != 0 || !ofs.flush()) {
+          LOG_ERROR << "Unable to print assembly for module " << M.getName() << "\n";
+          return EXIT_FAILURE;
         }
+        LOG_INFO << "Assembly for module " << M.getName()
+                 << " written to: " << name << "\n";
       } else {
         LOG_ERROR << "Could not output assembly output file: \"" << name
                   << "\".\n";
+        return EXIT_FAILURE;
       }
     }
 
@@ -659,7 +664,8 @@ int main(int argc, char** argv) try {
     // Write ASM to the standard output if no other action was taken.
     if ((vm.count("asm") == 0) && (vm.count("binary") == 0) &&
         (vm.count("version-script") == 0)) {
-      pp.print(std::cout, ctx, M);
+      if (pp.print(std::cout, ctx, M) != 0 || !std::cout.flush())
+        return EXIT_FAILURE;
     }
   }
   return EXIT_SUCCESS;

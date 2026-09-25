@@ -7,6 +7,7 @@ from gtirb_helpers import (
     create_test_module,
     add_function,
     add_code_block,
+    add_elf_symbol_info,
 )
 import pprinter_helpers
 import gtirb
@@ -31,6 +32,27 @@ def create_ir_with_name(name: str) -> gtirb.IR:
 
 
 class NameConflictTest(unittest.TestCase):
+    def test_global_binding_keeps_original_name(self):
+        """A private same-name object must not steal an externally bound name."""
+        for binding, visibility, directive in (
+            ("GLOBAL", "DEFAULT", ".globl"),
+            ("GLOBAL", "HIDDEN", ".globl"),
+            ("WEAK", "DEFAULT", ".weak"),
+        ):
+            with self.subTest(binding=binding, visibility=visibility):
+                ir, module = create_test_module(
+                    gtirb.Module.FileFormat.ELF, gtirb.Module.ISA.X64
+                )
+                _, interval = add_data_section(module, 0x1000)
+                private = add_symbol(module, "shared_data", add_data_block(interval, bytes(8)))
+                public = add_symbol(module, "shared_data", add_data_block(interval, bytes(8)))
+                add_elf_symbol_info(module, private, 8, "OBJECT", "LOCAL")
+                add_elf_symbol_info(module, public, 8, "OBJECT", binding, visibility)
+                asm = pprinter_helpers.run_asm_pprinter(ir, ["--policy", "complete"])
+                self.assertIn(directive + " shared_data\n", asm)
+                self.assertNotIn(directive + " shared_data_disambig_", asm)
+                self.assertIn("shared_data_disambig_0x1000_0:", asm)
+
     def test_di_att(self):
         ir = create_ir_with_name("di")
         asm = pprinter_helpers.run_asm_pprinter(ir, ["--syntax", "att"])

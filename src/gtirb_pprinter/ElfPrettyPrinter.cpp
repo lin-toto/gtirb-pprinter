@@ -680,13 +680,16 @@ ElfPrettyPrinter::getAlignment(const gtirb::CodeBlock& Block) {
 
 const gtirb::Symbol* ElfPrettyPrinter::getBestSymbol(
     const std::set<const gtirb::Symbol*, CmpSymPtr>& Symbols) const {
-  // Prioritize global/exported symbols over local symbols.
+  // Prioritize linker-visible bindings over local symbols. A hidden global
+  // (for example a CRT handle referenced by a newly linked object) must keep
+  // its name too: hidden visibility restricts dynamic preemption, not static
+  // linkage. Letting a same-name local keep it changes external bindings.
   // If all the ambiguous symbols have versions,
   // choose the one with the base version.
   std::set<const gtirb::Symbol*, CmpSymPtr> Globals;
   for (auto& Symbol : Symbols) {
     auto Info = aux_data::getElfSymbolInfo(*Symbol);
-    if (!Info || Info->Binding == "LOCAL" || Info->Visibility != "DEFAULT") {
+    if (!Info || Info->Binding == "LOCAL") {
       continue;
     }
     if (aux_data::hasBaseVersion(*Symbol)) {

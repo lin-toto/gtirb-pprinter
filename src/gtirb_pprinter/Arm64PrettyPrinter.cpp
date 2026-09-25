@@ -138,6 +138,30 @@ bool hasOmittedPostIndex(const cs_insn& Inst) {
          std::strstr(Inst.op_str, "],") != nullptr;
 }
 
+bool hasDuplicatedCompareZero(const cs_insn& Inst) {
+  // Capstone 5 can append the implicit zero twice for scalar integer SIMD
+  // compares. These forms have two register operands and one zero immediate;
+  // the duplicate detailed operand is not an architectural fourth operand.
+  switch (Inst.id) {
+  case ARM64_INS_CMEQ:
+  case ARM64_INS_CMGE:
+  case ARM64_INS_CMGT:
+  case ARM64_INS_CMLE:
+  case ARM64_INS_CMLT:
+    break;
+  default:
+    return false;
+  }
+  const auto& Detail = Inst.detail->arm64;
+  return Detail.op_count == 4 &&
+         Detail.operands[0].type == ARM64_OP_REG &&
+         Detail.operands[1].type == ARM64_OP_REG &&
+         Detail.operands[2].type == ARM64_OP_IMM &&
+         Detail.operands[2].imm == 0 &&
+         Detail.operands[3].type == ARM64_OP_IMM &&
+         Detail.operands[3].imm == 0;
+}
+
 bool hasMnemonicPrefix(const cs_insn& Inst, std::string_view Prefix) {
   const std::string_view Mnemonic(Inst.mnemonic);
   return Mnemonic.size() >= Prefix.size() &&
@@ -296,12 +320,14 @@ void Arm64PrettyPrinter::printInstruction(std::ostream& os,
 
   // Some optional-extension instructions are rejected under the baseline
   // `.arch armv8-a` directive, and Capstone occasionally omits vector-lane or
-  // post-index operands from its detailed representation. When no relocation
+  // post-index operands or duplicates a scalar compare's zero operand in its
+  // detailed representation. When no relocation
   // is attached, preserve those instructions exactly with `.inst` instead of
   // emitting a mnemonic that is unsupported or semantically incomplete.
   if (!hasSymbolicExpression(block, inst) && inst.size == 4 &&
       (isOptionalArchitectureInstruction(this->csHandle, inst) ||
-       hasIncompleteVectorLane(inst) || hasOmittedPostIndex(inst))) {
+       hasIncompleteVectorLane(inst) || hasOmittedPostIndex(inst) ||
+       hasDuplicatedCompareZero(inst))) {
     uint32_t Word = 0;
     if (module.getByteOrder() == gtirb::ByteOrder::Big) {
       for (uint8_t I = 0; I < inst.size; ++I) {

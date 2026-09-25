@@ -10,6 +10,52 @@ from pprinter_helpers import run_asm_pprinter, PPrinterTest
 
 
 class Arm64InstructionsTest(PPrinterTest):
+    @unittest.skipUnless(shutil.which("aarch64-linux-gnu-as") and
+                         shutil.which("aarch64-linux-gnu-objcopy"),
+                         "requires AArch64 binutils")
+    def test_scalar_compare_zero_roundtrip_exact_bytes(self):
+        """Capstone's duplicate zero operand must not corrupt scalar compares."""
+        instructions = [
+            f"{mnemonic} {destination},{source},#0"
+            for mnemonic in ("cmge", "cmgt", "cmeq", "cmle", "cmlt")
+            for destination, source in (("d0", "d1"), ("d31", "d31"), ("d0", "d31"))
+        ]
+        # Correct three-operand vector, floating-point and register-source
+        # comparisons must retain their encodings as well.
+        instructions += [
+            f"{mnemonic} v0.16b,v1.16b,#0"
+            for mnemonic in ("cmge", "cmgt", "cmeq", "cmle", "cmlt")
+        ] + [
+            f"{mnemonic} d0,d1,#0.0"
+            for mnemonic in ("fcmge", "fcmgt", "fcmeq", "fcmle", "fcmlt")
+        ] + [
+            f"{mnemonic} d0,d1,d2" for mnemonic in ("cmge", "cmgt", "cmeq")
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def assemble(text):
+                result = subprocess.run([
+                    "aarch64-linux-gnu-as", "-o", str(root / "code.o"),
+                ], input=text + "\n", text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                subprocess.run([
+                    "aarch64-linux-gnu-objcopy", "-O", "binary", "-j", ".text",
+                    str(root / "code.o"), str(root / "code.bin"),
+                ], check=True, capture_output=True)
+                return (root / "code.bin").read_bytes()
+
+            for instruction in instructions:
+                with self.subTest(instruction=instruction):
+                    original = assemble(instruction)
+                    ir, module = create_test_module(
+                        file_format=gtirb.Module.FileFormat.ELF,
+                        isa=gtirb.Module.ISA.ARM64,
+                    )
+                    _, interval = add_text_section(module)
+                    add_code_block(interval, original)
+                    self.assertEqual(assemble(run_asm_pprinter(ir)), original)
+
     def test_unpack_instructions(self):
         """
         Test printing various instructions

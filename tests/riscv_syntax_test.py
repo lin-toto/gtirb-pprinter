@@ -379,6 +379,30 @@ class RiscvInstructionsTest(PPrinterTest):
         self.assertIn("jalr zero,t0,%pcrel_lo(jump_anchor)", asm)
         self.assertNotIn("jalr ra,t0,%pcrel_lo(jump_anchor)", asm)
 
+    def test_symbolic_compressed_indirect_transfers_expand(self):
+        """C.JR/C.JALR acquire a low relocation without changing link semantics."""
+        for encoding, destination in (("0293", "ra"), ("0283", "zero")):
+            with self.subTest(destination=destination):
+                ir, module = create_test_module(
+                    file_format=gtirb.Module.FileFormat.ELF,
+                    isa=gtirb.Module.ISA.ValidButUnsupported,
+                )
+                module.aux_data["archInfo"] = gtirb.AuxData(
+                    type_name="mapping<string,string>", data={"ISA": "RISCV64"})
+                _, interval = add_text_section(module)
+                high = add_code_block(interval, bytes.fromhex("17030000"))  # AUIPC t1
+                low = add_code_block(interval, bytes.fromhex(encoding))
+                anchor = gtirb.Symbol("transfer_anchor", payload=high, module=module)
+                target = gtirb.Symbol("target", payload=gtirb.ProxyBlock(module=module), module=module)
+                attrs = gtirb.SymbolicExpression.Attribute
+                interval.symbolic_expressions[high.offset] = gtirb.SymAddrConst(
+                    0, target, {attrs.PCREL, attrs.HI})
+                interval.symbolic_expressions[low.offset] = gtirb.SymAddrConst(
+                    0, anchor, {attrs.PCREL, attrs.LO})
+                assembly = run_asm_pprinter(ir)
+                self.assertIn("jalr %s,t1,%%pcrel_lo(transfer_anchor)" % destination, assembly)
+                self.assertNotRegex(assembly, r"c\.j(?:al)?r\s")
+
     def test_same_section_conditional_branches_stay_native(self):
         """Symbolic short branches must not gain a printer-inserted jump."""
         cases = (

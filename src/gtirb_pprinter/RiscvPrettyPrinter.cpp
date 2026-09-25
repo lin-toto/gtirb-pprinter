@@ -489,7 +489,8 @@ bool RiscvPrettyPrinter::hasSymbolicJalrAlias(
   const cs_riscv& Detail = inst.detail->riscv;
   std::string Mnemonic = ascii_str_tolower(inst.mnemonic);
 
-  if ((inst.id != RISCV_INS_JALR && Mnemonic != "jalr") ||
+  if ((inst.id != RISCV_INS_JALR && inst.id != RISCV_INS_C_JALR &&
+       inst.id != RISCV_INS_C_JR && Mnemonic != "jalr" && Mnemonic != "jr") ||
       Detail.op_count != 1 || Detail.operands[0].type != RISCV_OP_REG) {
     return false;
   }
@@ -621,7 +622,9 @@ void RiscvPrettyPrinter::validatePcrelAnchors() const {
         Source = Detail.operands[0].reg;
       } else if (LowInsn->id == RISCV_INS_ADDI ||
                  LowInsn->id == RISCV_INS_ADDIW ||
-                 LowInsn->id == RISCV_INS_JALR) {
+                 LowInsn->id == RISCV_INS_JALR ||
+                 LowInsn->id == RISCV_INS_C_JALR ||
+                 LowInsn->id == RISCV_INS_C_JR) {
         // Capstone aliases mv/jalr/jr omit a zero immediate and sometimes rd.
         unsigned int Index = Detail.op_count == 1 ? 0 : 1;
         if (Detail.op_count > Index && Detail.operands[Index].type == RISCV_OP_REG) {
@@ -1245,11 +1248,11 @@ void RiscvPrettyPrinter::printOperandList(std::ostream& os,
   if (hasSymbolicJalrAlias(block, inst)) {
     // Capstone contracts `jalr ra,reg,0` to `jalr reg` and
     // `jalr zero,reg,0` to `jr reg`.  A symbolic low immediate cannot be
-    // printed in either alias, so restore the expanded spelling while
-    // preserving whether the original instruction calls or tail-jumps.
+    // printed in either alias or its compressed equivalent, so restore the
+    // expanded spelling while preserving calls versus tail jumps.
     const std::string Mnemonic = ascii_str_tolower(inst.mnemonic);
     const unsigned int Destination =
-        Mnemonic == "jr" ? RISCV_REG_ZERO : RISCV_REG_RA;
+        (Mnemonic == "jr" || Mnemonic == "c.jr") ? RISCV_REG_ZERO : RISCV_REG_RA;
     os << getRegisterName(Destination) << ',';
     printOperand(os, block, inst, 0);
     os << ',';

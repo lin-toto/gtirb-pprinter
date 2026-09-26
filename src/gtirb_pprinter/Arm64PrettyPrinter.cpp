@@ -279,6 +279,10 @@ std::string Arm64PrettyPrinter::getRegisterName(const cs_aarch64_op& op) const {
   return capstone_compat::aarch64RegName(this->csHandle, op.reg, op.is_vreg);
 }
 
+bool Arm64PrettyPrinter::adaptInstruction(cs_insn& inst) {
+  return capstone_compat::adaptAArch64(this->csHandle, inst);
+}
+
 void Arm64PrettyPrinter::fixupInstruction(const gtirb::CodeBlock& block,
                                           cs_insn& inst) {
   PrettyPrinterBase::fixupInstruction(block, inst);

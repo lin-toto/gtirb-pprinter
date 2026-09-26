@@ -107,8 +107,6 @@ class Arm64InstructionsTest(PPrinterTest):
         instructions = [
             (b"\x00\x48\x28\x4E", ".inst 0x4e284800"),  # AESE
             (b"\x00\xE0\xE0\x0E", ".inst 0x0ee0e000"),  # PMULL
-            (b"\xDF\x04\x18\x5E", ".inst 0x5e1804df"),  # MOV lane
-            (b"\x14\x7C\x9F\x4C", ".inst 0x4c9f7c14"),  # ST1 post-index
             (b"\x01\x00\x21\xB8", ".inst 0xb8210001"),  # LDADD
             (b"\x1F\x24\x03\xD5", ".inst 0xd503241f"),  # BTI
             (b"\x99\x2A\x0F\xCE", ".inst 0xce0f2a99"),  # SHA3 EOR3
@@ -164,6 +162,53 @@ class Arm64InstructionsTest(PPrinterTest):
                     _, interval = add_text_section(module)
                     add_code_block(interval, original)
                     self.assertEqual(assemble(run_asm_pprinter(ir)), original)
+
+    @unittest.skipUnless(
+        shutil.which("aarch64-linux-gnu-as")
+        and shutil.which("aarch64-linux-gnu-objcopy"),
+        "requires AArch64 binutils",
+    )
+    def test_complete_details_print_exact_mnemonics(self):
+        """
+        Capstone 5 left out the lane arrangement of a scalar DUP and the
+        post-index immediate of a single-register ST1, so these printed as
+        .inst. Capstone 6 reports both; the mnemonics must round-trip.
+        """
+        instructions = [
+            (b"\xDF\x04\x18\x5E", "mov d31,v6.d[1]"),
+            (b"\x14\x7C\x9F\x4C", "st1 {v20.2d},[x0],#16"),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for insn_bytes, expected in instructions:
+                with self.subTest(expected=expected):
+                    ir, m = create_test_module(
+                        file_format=gtirb.Module.FileFormat.ELF,
+                        isa=gtirb.Module.ISA.ARM64,
+                    )
+                    _, bi = add_text_section(m)
+                    add_code_block(bi, insn_bytes)
+                    asm = run_asm_pprinter(ir)
+                    self.assertIn(expected, asm)
+                    subprocess.run(
+                        ["aarch64-linux-gnu-as", "-o", str(root / "code.o")],
+                        input=asm,
+                        text=True,
+                        check=True,
+                        capture_output=True,
+                    )
+                    subprocess.run(
+                        [
+                            "aarch64-linux-gnu-objcopy", "-O", "binary",
+                            "-j", ".text", str(root / "code.o"),
+                            str(root / "code.bin"),
+                        ],
+                        check=True,
+                        capture_output=True,
+                    )
+                    self.assertEqual(
+                        (root / "code.bin").read_bytes(), insn_bytes
+                    )
 
     def test_fixed_width_nop_is_printed_once(self):
         ir, m = create_test_module(

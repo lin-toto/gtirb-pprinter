@@ -42,6 +42,7 @@ public:
 protected:
   std::string getRegisterName(unsigned int reg) const override;
   std::string getRegisterName(const cs_aarch64_op& op) const;
+  bool adaptInstruction(cs_insn& inst) override;
   void fixupInstruction(const gtirb::CodeBlock& block, cs_insn& inst) override;
 
   void printInstruction(std::ostream& os, const gtirb::CodeBlock& block,

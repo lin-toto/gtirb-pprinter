@@ -392,6 +392,12 @@ protected:
                                   uint64_t offset);
   virtual void printByte(std::ostream& os, std::byte byte) = 0;
 
+  // Called for every instruction right after it is decoded, before anything
+  // else reads it: rewrites a Capstone 6 instruction into the shape the
+  // printer's logic expects (see CapstoneCompat.hpp). Returns false if the
+  // instruction must be treated as undecodable.
+  virtual bool adaptInstruction(cs_insn& inst);
+
   virtual void fixupInstruction(const gtirb::CodeBlock& block, cs_insn& inst);
 
   // x86-specific fixups helper.

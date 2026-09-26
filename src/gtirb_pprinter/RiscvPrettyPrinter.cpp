@@ -8,6 +8,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "RiscvPrettyPrinter.hpp"
+#include "CapstoneCompat.hpp"
 #include "StringUtils.hpp"
 
 #include <algorithm>
@@ -440,26 +441,22 @@ RiscvPrettyPrinter::RiscvPrettyPrinter(gtirb::Context& context_,
                                        const ElfSyntax& syntax_,
                                        const PrintingPolicy& policy_)
     : ElfPrettyPrinter(context_, module_, syntax_, policy_) {
-  unsigned int mode =
-      getModuleISA(module_) == "riscv64" ? CS_MODE_RISCV64 : CS_MODE_RISCV32;
-  mode |= CS_MODE_RISCV_C;
-
-  if (module_.getByteOrder() == gtirb::ByteOrder::Big) {
-    mode |= CS_MODE_BIG_ENDIAN;
-  } else if (module_.getByteOrder() == gtirb::ByteOrder::Little) {
-    mode |= CS_MODE_LITTLE_ENDIAN;
-  } else {
-    mode |= CS_MODE_LITTLE_ENDIAN;
-  }
-
-  [[maybe_unused]] cs_err err =
-      cs_open(CS_ARCH_RISCV, static_cast<cs_mode>(mode), &this->csHandle);
+  // RV32GC/RV64GC with real (non-alias) syntax and details; every decoded
+  // instruction then goes through capstone_compat::adaptRiscv, which restores
+  // the Capstone 5.0.1 spellings and operand shapes this printer relies on.
+  [[maybe_unused]] cs_err err = capstone_compat::openRiscv(
+      getModuleISA(module_) == "riscv64",
+      module_.getByteOrder() == gtirb::ByteOrder::Big, &this->csHandle);
   assert(err == CS_ERR_OK && "Capstone failure");
 
   validatePcrelAnchors();
   collectTargetLabels();
   collectLocalBranchLabels();
   collectInteriorCodeSymbols();
+}
+
+bool RiscvPrettyPrinter::adaptInstruction(cs_insn& inst) {
+  return capstone_compat::adaptRiscv(this->csHandle, inst);
 }
 
 std::string RiscvPrettyPrinter::getRegisterName(unsigned int reg) const {
@@ -566,9 +563,12 @@ void RiscvPrettyPrinter::validatePcrelAnchors() const {
   cs_option(this->csHandle, CS_OPT_DETAIL, CS_OPT_ON);
   auto Decode = [&](const gtirb::ByteInterval& Interval, uint64_t Offset) {
     cs_insn* Insn = nullptr;
-    if (Offset < Interval.getInitializedSize()) {
-      cs_disasm(this->csHandle, Interval.rawBytes<uint8_t>() + Offset,
-                Interval.getInitializedSize() - Offset, 0, 1, &Insn);
+    if (Offset < Interval.getInitializedSize() &&
+        cs_disasm(this->csHandle, Interval.rawBytes<uint8_t>() + Offset,
+                  Interval.getInitializedSize() - Offset, 0, 1, &Insn) == 1 &&
+        !capstone_compat::adaptRiscv(this->csHandle, *Insn)) {
+      cs_free(Insn, 1);
+      Insn = nullptr;
     }
     return std::unique_ptr<cs_insn, std::function<void(cs_insn*)>>(
         Insn, [](cs_insn* I) { cs_free(I, 1); });
@@ -664,6 +664,10 @@ void RiscvPrettyPrinter::collectLocalBranchLabels() {
         Insn, [Count](cs_insn* I) { cs_free(I, Count); });
 
     for (size_t I = 0; I < Count; I++) {
+      // Stop where Capstone 5.0.1's cs_disasm would have stopped.
+      if (!capstone_compat::adaptRiscv(this->csHandle, Insn[I])) {
+        break;
+      }
       InstructionAddresses.insert(Insn[I].address);
       if (!isPcRelativeImmediate(Insn[I].id)) {
         continue;

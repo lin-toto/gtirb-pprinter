@@ -40,6 +40,7 @@ public:
                      const ElfSyntax& syntax, const PrintingPolicy& policy);
 
 protected:
+  bool adaptInstruction(cs_insn& inst) override;
   std::string getRegisterName(unsigned int reg) const override;
 
   bool hasSymbolicAddiAlias(const gtirb::CodeBlock& block,

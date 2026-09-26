@@ -6,6 +6,7 @@
 #include <fstream>
 #include <gtirb/Module.hpp>
 #include <gtirb_layout/gtirb_layout.hpp>
+#include <gtirb_pprinter/CapstoneCompat.hpp>
 #include <gtirb_pprinter/ElfBinaryPrinter.hpp>
 #include <gtirb_pprinter/ElfVersionScriptPrinter.hpp>
 #include <gtirb_pprinter/Fixup.hpp>
@@ -118,6 +119,14 @@ getInterpreterName(const gtirb::Module& Module) {
 }
 
 int main(int argc, char** argv) try {
+  int CapstoneMajor = 0, CapstoneMinor = 0;
+  if (!capstone_compat::loadedCapstoneMatchesHeaders(&CapstoneMajor,
+                                                     &CapstoneMinor)) {
+    LOG_ERROR << "gtirb-pprinter was built for Capstone " << CS_API_MAJOR << "."
+              << CS_API_MINOR << " but loaded Capstone " << CapstoneMajor << "."
+              << CapstoneMinor << "\n";
+    return EXIT_FAILURE;
+  }
   gtirb_layout::registerAuxDataTypes();
   gtirb_pprint::registerAuxDataTypes();
   gtirb_pprint::registerPrettyPrinters();

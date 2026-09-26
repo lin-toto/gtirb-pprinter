@@ -25,6 +25,22 @@
 
 namespace capstone_compat {
 
+// True if the Capstone library loaded at run time is the version these
+// headers describe. A stale LD_LIBRARY_PATH can load another Capstone 6 build
+// whose structures differ.
+inline bool loadedCapstoneMatchesHeaders(int* Major = nullptr,
+                                         int* Minor = nullptr) {
+  int LoadedMajor = 0, LoadedMinor = 0;
+  cs_version(&LoadedMajor, &LoadedMinor);
+  if (Major) {
+    *Major = LoadedMajor;
+  }
+  if (Minor) {
+    *Minor = LoadedMinor;
+  }
+  return LoadedMajor == CS_API_MAJOR && LoadedMinor == CS_API_MINOR;
+}
+
 //===----------------------------------------------------------------------===//
 // AArch64
 //===----------------------------------------------------------------------===//

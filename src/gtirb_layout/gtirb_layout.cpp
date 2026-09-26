@@ -398,6 +398,21 @@ static std::vector<ByteInterval*> toposort(Section& S) {
   return Sorted;
 }
 
+/// Rebuild the symbol address index after changing block addresses in bulk.
+/// GTIRB updates code and data referents separately, so inserting symbols for
+/// one kind while the other kind still has stale index positions can leave the
+/// combined index unordered. Remove all entries before reinserting any; merely
+/// filtering false lookup results would still lose aliases missing from them.
+static void rebuildSymbolIndex(Module& M) {
+  std::vector<Symbol*> Symbols;
+  for (Symbol& Sym : M.symbols())
+    Symbols.push_back(&Sym);
+  for (Symbol* Sym : Symbols)
+    M.removeSymbol(Sym);
+  for (Symbol* Sym : Symbols)
+    M.addSymbol(Sym);
+}
+
 bool ::gtirb_layout::layoutModule(gtirb::Context& Ctx, Module& M) {
   using namespace gtirb::schema;
 
@@ -440,6 +455,7 @@ bool ::gtirb_layout::layoutModule(gtirb::Context& Ctx, Module& M) {
     }
   }
 
+  rebuildSymbolIndex(M);
   return true;
 }
 
@@ -465,5 +481,6 @@ bool ::gtirb_layout::removeModuleLayout(gtirb::Context& Ctx, Module& M) {
     }
   }
 
+  rebuildSymbolIndex(M);
   return true;
 }

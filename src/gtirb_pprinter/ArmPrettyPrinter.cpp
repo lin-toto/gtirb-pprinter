@@ -72,6 +72,26 @@ ArmPrettyPrinter::ArmPrettyPrinter(gtirb::Context& context_,
   cs_option(this->csHandle, CS_OPT_DETAIL, CS_OPT_ON);
 }
 
+ArmPrettyPrinter::~ArmPrettyPrinter() {
+  for (auto& [Mode, Handle] : ModeHandles) {
+    cs_close(&Handle);
+  }
+}
+
+csh ArmPrettyPrinter::handleForMode(size_t Mode) {
+  auto It = ModeHandles.find(Mode);
+  if (It != ModeHandles.end()) {
+    return It->second;
+  }
+  csh Handle = 0;
+  [[maybe_unused]] cs_err Err =
+      cs_open(CS_ARCH_ARM, static_cast<cs_mode>(Mode), &Handle);
+  assert(Err == CS_ERR_OK && "Capstone failure");
+  cs_option(Handle, CS_OPT_DETAIL, CS_OPT_ON);
+  ModeHandles[Mode] = Handle;
+  return Handle;
+}
+
 void ArmPrettyPrinter::printHeader(std::ostream& os) {
   os << "# ARM " << std::endl;
   os << ".syntax unified" << std::endl;
@@ -128,8 +148,7 @@ void ArmPrettyPrinter::printBlockContents(std::ostream& Os,
   for (size_t CsMode : CsModes) {
     cs_insn* Insn = nullptr;
 
-    cs_option(this->csHandle, CS_OPT_MODE, CsMode);
-    InsnCount = cs_disasm(this->csHandle, X.rawBytes<uint8_t>() + Offset,
+    InsnCount = cs_disasm(handleForMode(CsMode), X.rawBytes<uint8_t>() + Offset,
                           X.getSize() - Offset,
                           static_cast<uint64_t>(Addr) + Offset, 0, &Insn);
 

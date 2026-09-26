@@ -38,3 +38,25 @@ class Arm32InstructionsTest(PPrinterTest):
 
                 asm = run_asm_pprinter(ir)
                 self.assertIn(insn_str, asm)
+
+    def test_arm_block_after_thumb_block(self):
+        """
+        Blocks of both decode modes in one module print in their own mode.
+        Capstone 6 ORs CS_OPT_MODE into an ARM handle, so switching one handle
+        from Thumb back to ARM mode left it decoding Thumb.
+        """
+        ir, m = create_test_module(
+            file_format=gtirb.Module.FileFormat.ELF,
+            isa=gtirb.Module.ISA.ARM,
+        )
+        s, bi = add_text_section(m)
+        thumb_block = add_code_block(bi, b"\x01\x20\x02\x21")
+        thumb_block.decode_mode = gtirb.CodeBlock.DecodeMode.Thumb
+        arm_block = add_code_block(bi, b"\x01\x00\x9f\xe7")
+        arm_block.decode_mode = gtirb.CodeBlock.DecodeMode.Default
+
+        asm = run_asm_pprinter(ir)
+        self.assertIn("movs r0, #1", asm)
+        self.assertIn("movs r1, #2", asm)
+        # Capstone 6 spells pc as r15 unless CS_OPT_SYNTAX_CS_REG_ALIAS is set.
+        self.assertRegex(asm, r"ldr r0, \[(pc|r15), r1\]")

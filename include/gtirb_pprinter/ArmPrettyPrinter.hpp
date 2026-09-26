@@ -17,6 +17,8 @@
 
 #include "ElfPrettyPrinter.hpp"
 
+#include <map>
+
 namespace gtirb_pprint {
 
 class ArmSyntax : public ElfSyntax {
@@ -47,6 +49,7 @@ class ArmPrettyPrinter : public ElfPrettyPrinter {
 public:
   ArmPrettyPrinter(gtirb::Context& context, const gtirb::Module& module,
                    const ArmSyntax& syntax, const PrintingPolicy& policy);
+  ~ArmPrettyPrinter() override;
 
 protected:
   const ArmSyntax& armSyntax;
@@ -77,6 +80,13 @@ protected:
                             const gtirb::Symbol* symbol) override;
   void printSymExprSuffix(std::ostream& OS, const gtirb::SymAttributeSet& Attrs,
                           bool IsNotBranch = false) override;
+
+private:
+  // Capstone 6 ORs CS_OPT_MODE into an ARM handle's mode instead of replacing
+  // it, so one handle cannot be switched back from Thumb to ARM. Each decode
+  // mode gets its own handle, opened on first use.
+  csh handleForMode(size_t Mode);
+  std::map<size_t, csh> ModeHandles;
 };
 
 class ArmPrettyPrinterFactory : public ElfPrettyPrinterFactory {

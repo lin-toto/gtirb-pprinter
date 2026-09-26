@@ -26,6 +26,8 @@
 #include <gtirb/gtirb.hpp>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
+#include <stdexcept>
 #include <utility>
 #include <variant>
 
@@ -542,6 +544,23 @@ void PrettyPrinterBase::printBlockContents(std::ostream& os,
   // Exception-safe cleanup of instructions
   std::unique_ptr<cs_insn, std::function<void(cs_insn*)>> freeInsn(
       insn, [count](cs_insn* i) { cs_free(i, count); });
+
+  // cs_disasm stops at the first instruction it cannot decode (for example
+  // one of an extension the handle was not opened with), which would silently
+  // drop the rest of the block from the output. Fail instead.
+  uint64_t DecodedSize = 0;
+  for (size_t i = 0; i < count; i++) {
+    DecodedSize += insn[i].size;
+  }
+  if (DecodedSize != x.getSize() - offset) {
+    std::stringstream Message;
+    Message << "Capstone could not decode the instruction at 0x" << std::hex
+            << static_cast<uint64_t>(addr) + offset + DecodedSize
+            << " in the code block at 0x" << static_cast<uint64_t>(addr)
+            << std::dec << " (decoded " << DecodedSize << " of "
+            << x.getSize() - offset << " bytes)";
+    throw std::runtime_error(Message.str());
+  }
 
   gtirb::Offset blockOffset(x.getUUID(), offset);
   for (size_t i = 0; i < count; i++) {

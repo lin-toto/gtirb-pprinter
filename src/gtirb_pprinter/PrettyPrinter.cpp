@@ -791,16 +791,16 @@ void PrettyPrinterBase::printInstruction(std::ostream& os,
   ////////////////////////////////////////////////////////////////////
   // special cases
 
-  // Capstone instruction identifiers are architecture-local enums.  In
-  // particular, ARM64_INS_NOP has the same numeric value as
-  // X86_INS_SHA1MSG2, so comparing an x86 instruction against both enums
-  // silently turns SHA1MSG2 into NOPs.  Scope each comparison to the module
-  // ISA instead of mixing enum domains.
-  const bool IsNop =
-      ((module.getISA() == gtirb::ISA::X64 ||
-        module.getISA() == gtirb::ISA::IA32) &&
-       inst.id == X86_INS_NOP) ||
-      (module.getISA() == gtirb::ISA::ARM64 && inst.id == ARM64_INS_NOP);
+  // Capstone instruction identifiers are architecture-local enums, so
+  // comparing an x86 instruction against an AArch64 enum can silently match
+  // an unrelated instruction.  Scope each comparison to the module ISA
+  // instead of mixing enum domains.  Capstone 6 reports the AArch64 NOP as
+  // the HINT instruction with the NOP alias.
+  const bool IsNop = ((module.getISA() == gtirb::ISA::X64 ||
+                       module.getISA() == gtirb::ISA::IA32) &&
+                      inst.id == X86_INS_NOP) ||
+                     (module.getISA() == gtirb::ISA::ARM64 && inst.is_alias &&
+                      inst.alias_id == AARCH64_INS_ALIAS_NOP);
   if (IsNop) {
     // Replacing a multi-byte x86 NOP with several one-byte NOPs keeps its
     // size but changes instruction boundaries and counts on a fresh lift.

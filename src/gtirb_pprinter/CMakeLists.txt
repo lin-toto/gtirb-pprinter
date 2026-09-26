@@ -7,6 +7,7 @@ set(${PROJECT_NAME}_H
     ${CMAKE_SOURCE_DIR}/include/gtirb_pprinter/AuxDataSchema.hpp
     ${CMAKE_SOURCE_DIR}/include/gtirb_pprinter/AuxDataUtils.hpp
     ${CMAKE_SOURCE_DIR}/include/gtirb_pprinter/BinaryPrinter.hpp
+    ${CMAKE_SOURCE_DIR}/include/gtirb_pprinter/CapstoneCompat.hpp
     ${CMAKE_SOURCE_DIR}/include/gtirb_pprinter/Export.hpp
     ${CMAKE_SOURCE_DIR}/include/gtirb_pprinter/FileUtils.hpp
     ${CMAKE_SOURCE_DIR}/include/gtirb_pprinter/Fixup.hpp

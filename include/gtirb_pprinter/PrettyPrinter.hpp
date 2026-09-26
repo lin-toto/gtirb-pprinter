@@ -23,6 +23,9 @@
 
 #include <boost/range/any_range.hpp>
 #include <capstone/capstone.h>
+#if CS_API_MAJOR < 6
+#error "gtirb-pprinter requires Capstone 6 (6.0.0-Alpha11)"
+#endif
 #include <cstdint>
 #include <initializer_list>
 #include <iosfwd>

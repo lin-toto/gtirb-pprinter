@@ -72,58 +72,61 @@ bool hasSymbolicExpression(const gtirb::CodeBlock& Block,
   return false;
 }
 
-// Share upstream's lane-width recovery with the exact-encoding fallback.
-// Recoverable operands should reach the mnemonic printer; unknown forms must
-// still retain their original bytes rather than guess an element width.
-const char* inferredVectorLaneSuffix(const cs_insn& Inst, uint64_t Index) {
-  const auto& Detail = Inst.detail->arm64;
-  const auto& Op = Detail.operands[Index];
-  if (Detail.op_count != 2 || Op.reg < ARM64_REG_V0 ||
-      Op.reg > ARM64_REG_V31) {
-    return "";
-  }
-  const auto& Other = Detail.operands[Index ^ 1];
-  if (Other.type != ARM64_OP_REG) {
-    return "";
-  }
-  if ((Other.reg >= ARM64_REG_X0 && Other.reg <= ARM64_REG_X28) ||
-      Other.reg == ARM64_REG_X29 || Other.reg == ARM64_REG_X30 ||
-      Other.reg == ARM64_REG_XZR) {
-    return "d";
-  }
-  if ((Other.reg >= ARM64_REG_W0 && Other.reg <= ARM64_REG_W30) ||
-      Other.reg == ARM64_REG_WZR) {
-    return "s";
-  }
-  switch (Other.vas) {
-  case ARM64_VAS_16B:
-  case ARM64_VAS_8B:
-  case ARM64_VAS_4B:
-  case ARM64_VAS_1B:
+// Capstone 6 encodes a vector arrangement as (lanes << 8) | element bits,
+// with zero lanes for a single indexed element (AArch64Layout_VectorLayout).
+const char* vectorElementSuffix(AArch64Layout_VectorLayout Vas) {
+  switch (Vas & 0xff) {
+  case 8:
     return "b";
-  case ARM64_VAS_8H:
-  case ARM64_VAS_4H:
-  case ARM64_VAS_2H:
-  case ARM64_VAS_1H:
+  case 16:
     return "h";
-  case ARM64_VAS_4S:
-  case ARM64_VAS_2S:
-  case ARM64_VAS_1S:
+  case 32:
     return "s";
-  case ARM64_VAS_2D:
-  case ARM64_VAS_1D:
+  case 64:
     return "d";
+  case 128:
+    return "q";
   default:
     return "";
   }
 }
 
+// Share upstream's lane-width recovery with the exact-encoding fallback.
+// Recoverable operands should reach the mnemonic printer; unknown forms must
+// still retain their original bytes rather than guess an element width.
+const char* inferredVectorLaneSuffix(const cs_insn& Inst, uint64_t Index) {
+  const auto& Detail = Inst.detail->aarch64;
+  const auto& Op = Detail.operands[Index];
+  if (Detail.op_count != 2 || !Op.is_vreg) {
+    return "";
+  }
+  const auto& Other = Detail.operands[Index ^ 1];
+  if (Other.type != AARCH64_OP_REG) {
+    return "";
+  }
+  if (!Other.is_vreg &&
+      ((Other.reg >= AARCH64_REG_X0 && Other.reg <= AARCH64_REG_X28) ||
+       Other.reg == AARCH64_REG_X29 || Other.reg == AARCH64_REG_X30 ||
+       Other.reg == AARCH64_REG_XZR)) {
+    return "d";
+  }
+  if (!Other.is_vreg &&
+      ((Other.reg >= AARCH64_REG_W0 && Other.reg <= AARCH64_REG_W30) ||
+       Other.reg == AARCH64_REG_WZR)) {
+    return "s";
+  }
+  // The element size of a known arrangement; a quadword (.1q) arrangement
+  // has no lane form to infer.
+  const char* Suffix = vectorElementSuffix(Other.vas);
+  return Suffix[0] == 'q' ? "" : Suffix;
+}
+
 bool hasIncompleteVectorLane(const cs_insn& Inst) {
-  const auto& Detail = Inst.detail->arm64;
+  const auto& Detail = Inst.detail->aarch64;
   for (uint8_t I = 0; I < Detail.op_count; ++I) {
     const auto& Op = Detail.operands[I];
-    if (Op.type == ARM64_OP_REG && Op.vector_index >= 0 &&
-        Op.vas == ARM64_VAS_INVALID &&
+    if (Op.type == AARCH64_OP_REG && Op.vector_index >= 0 &&
+        Op.vas == AARCH64LAYOUT_INVALID &&
         inferredVectorLaneSuffix(Inst, I)[0] == '\0') {
       return true;
     }
@@ -132,9 +135,9 @@ bool hasIncompleteVectorLane(const cs_insn& Inst) {
 }
 
 bool hasOmittedPostIndex(const cs_insn& Inst) {
-  const auto& Detail = Inst.detail->arm64;
-  return Detail.writeback && Detail.op_count > 0 &&
-         Detail.operands[Detail.op_count - 1].type == ARM64_OP_MEM &&
+  const auto& Detail = Inst.detail->aarch64;
+  return Inst.detail->writeback && Detail.op_count > 0 &&
+         Detail.operands[Detail.op_count - 1].type == AARCH64_OP_MEM &&
          std::strstr(Inst.op_str, "],") != nullptr;
 }
 
@@ -143,22 +146,21 @@ bool hasDuplicatedCompareZero(const cs_insn& Inst) {
   // compares. These forms have two register operands and one zero immediate;
   // the duplicate detailed operand is not an architectural fourth operand.
   switch (Inst.id) {
-  case ARM64_INS_CMEQ:
-  case ARM64_INS_CMGE:
-  case ARM64_INS_CMGT:
-  case ARM64_INS_CMLE:
-  case ARM64_INS_CMLT:
+  case AARCH64_INS_CMEQ:
+  case AARCH64_INS_CMGE:
+  case AARCH64_INS_CMGT:
+  case AARCH64_INS_CMLE:
+  case AARCH64_INS_CMLT:
     break;
   default:
     return false;
   }
-  const auto& Detail = Inst.detail->arm64;
-  return Detail.op_count == 4 &&
-         Detail.operands[0].type == ARM64_OP_REG &&
-         Detail.operands[1].type == ARM64_OP_REG &&
-         Detail.operands[2].type == ARM64_OP_IMM &&
+  const auto& Detail = Inst.detail->aarch64;
+  return Detail.op_count == 4 && Detail.operands[0].type == AARCH64_OP_REG &&
+         Detail.operands[1].type == AARCH64_OP_REG &&
+         Detail.operands[2].type == AARCH64_OP_IMM &&
          Detail.operands[2].imm == 0 &&
-         Detail.operands[3].type == ARM64_OP_IMM &&
+         Detail.operands[3].type == AARCH64_OP_IMM &&
          Detail.operands[3].imm == 0;
 }
 
@@ -169,34 +171,37 @@ bool hasMnemonicPrefix(const cs_insn& Inst, std::string_view Prefix) {
 }
 
 bool isOptionalArchitectureInstruction(csh Handle, const cs_insn& Inst) {
-  // Capstone annotates most optional AArch64 extensions with an instruction
-  // group. Printing their exact encoding keeps reconstruction independent of
-  // the assembler's selected architecture level.
-  static const arm64_insn_group OptionalGroups[] = {
-      ARM64_GRP_CRYPTO,      ARM64_GRP_CRC,
-      ARM64_GRP_AES,         ARM64_GRP_DOTPROD,
-      ARM64_GRP_FULLFP16,    ARM64_GRP_LSE,
-      ARM64_GRP_RCPC,        ARM64_GRP_RDM,
-      ARM64_GRP_SHA2,        ARM64_GRP_SHA3,
-      ARM64_GRP_SM4,         ARM64_GRP_SVE,
-      ARM64_GRP_SVE2,        ARM64_GRP_SVE2AES,
-      ARM64_GRP_SVE2BitPerm, ARM64_GRP_SVE2SHA3,
-      ARM64_GRP_SVE2SM4,     ARM64_GRP_SME,
-      ARM64_GRP_SMEF64,      ARM64_GRP_SMEI64,
-      ARM64_GRP_MatMulFP32,  ARM64_GRP_MatMulFP64,
-      ARM64_GRP_MatMulInt8,  ARM64_GRP_V8_1A,
-      ARM64_GRP_V8_3A,       ARM64_GRP_V8_4A,
+  // Capstone annotates optional AArch64 extensions with the LLVM feature the
+  // instruction requires. Printing their exact encoding keeps reconstruction
+  // independent of the assembler's selected architecture level. These are the
+  // Capstone 6 features that correspond to the Capstone 5 groups used before
+  // (CRYPTO is covered by AES and SHA2; PAC by PAUTH). Baseline instructions
+  // now also carry HasNEON or HasFPARMv8, which are not optional here.
+  static const aarch64_insn_group OptionalGroups[] = {
+      AARCH64_FEATURE_HASAES,        AARCH64_FEATURE_HASCRC,
+      AARCH64_FEATURE_HASDOTPROD,    AARCH64_FEATURE_HASFULLFP16,
+      AARCH64_FEATURE_HASLSE,        AARCH64_FEATURE_HASRCPC,
+      AARCH64_FEATURE_HASRDM,        AARCH64_FEATURE_HASSHA2,
+      AARCH64_FEATURE_HASSHA3,       AARCH64_FEATURE_HASSM4,
+      AARCH64_FEATURE_HASSVE,        AARCH64_FEATURE_HASSVE2,
+      AARCH64_FEATURE_HASSVE2AES,    AARCH64_FEATURE_HASSVE2BITPERM,
+      AARCH64_FEATURE_HASSVE2SHA3,   AARCH64_FEATURE_HASSVE2SM4,
+      AARCH64_FEATURE_HASSME,        AARCH64_FEATURE_HASSMEF64F64,
+      AARCH64_FEATURE_HASSMEI16I64,  AARCH64_FEATURE_HASMATMULFP32,
+      AARCH64_FEATURE_HASMATMULFP64, AARCH64_FEATURE_HASMATMULINT8,
+      AARCH64_FEATURE_HASV8_1A,      AARCH64_FEATURE_HASV8_3A,
+      AARCH64_FEATURE_HASV8_4A,
   };
-  for (const arm64_insn_group Group : OptionalGroups) {
+  for (const aarch64_insn_group Group : OptionalGroups) {
     if (cs_insn_group(Handle, &Inst, Group)) {
       return true;
     }
   }
-  if (cs_insn_group(Handle, &Inst, ARM64_GRP_PAC)) {
+  if (cs_insn_group(Handle, &Inst, AARCH64_FEATURE_HASPAUTH)) {
     return true;
   }
 
-  // Capstone 5 does not consistently attach ARM64_GRP_LSE or an MTE group.
+  // Capstone does not consistently attach the LSE or an MTE feature group.
   // Cover the corresponding mnemonic families without enumerating aliases.
   static const std::string_view OptionalPrefixes[] = {
       "cas",    "ldadd", "ldclr", "ldeor", "ldset", "ldsmax",
@@ -226,7 +231,7 @@ Arm64PrettyPrinter::Arm64PrettyPrinter(gtirb::Context& context_,
     : ElfPrettyPrinter(context_, module_, syntax_, policy_) {
   // Setup Capstone.
   [[maybe_unused]] cs_err err =
-      cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &this->csHandle);
+      cs_open(CS_ARCH_AARCH64, CS_MODE_ARM, &this->csHandle);
   assert(err == CS_ERR_OK && "Capstone failure");
 
   buildSymGotRefTable();
@@ -264,7 +269,14 @@ void Arm64PrettyPrinter::printHeader(std::ostream& os) {
 }
 
 std::string Arm64PrettyPrinter::getRegisterName(unsigned int reg) const {
-  return reg == ARM64_REG_INVALID ? "" : cs_reg_name(this->csHandle, reg);
+  // Capstone 5 spellings: fp/lr for x29/x30.
+  return capstone_compat::aarch64RegName(this->csHandle, reg, false);
+}
+
+std::string Arm64PrettyPrinter::getRegisterName(const cs_aarch64_op& op) const {
+  // A vector operand is reported as its Q/D/S/H/B register with is_vreg set;
+  // print it as v<n>.
+  return capstone_compat::aarch64RegName(this->csHandle, op.reg, op.is_vreg);
 }
 
 void Arm64PrettyPrinter::fixupInstruction(const gtirb::CodeBlock& block,
@@ -272,7 +284,7 @@ void Arm64PrettyPrinter::fixupInstruction(const gtirb::CodeBlock& block,
   PrettyPrinterBase::fixupInstruction(block, inst);
 
   switch (inst.id) {
-  case ARM64_INS_MOV: {
+  case AARCH64_INS_MOVZ: {
     // Capstone aliases MOVZ as "mov", but the GNU assembler requires "movz"
     // when :abs_gN: relocation modifiers are used. If the instruction has a
     // symbolic operand with abs_g attributes, rename the mnemonic to "movz".
@@ -311,7 +323,7 @@ void Arm64PrettyPrinter::printInstruction(std::ostream& os,
   // special cases
   std::string opcode = std::string();
 
-  if (inst.id == ARM64_INS_NOP) {
+  if (inst.is_alias && inst.alias_id == AARCH64_INS_ALIAS_NOP) {
     InstructLine << "  " << syntax.nop();
     printCommentableLine(InstructLine, os, ea);
     os << '\n';
@@ -345,7 +357,7 @@ void Arm64PrettyPrinter::printInstruction(std::ostream& os,
     return;
   }
 
-  if (inst.id == ARM64_INS_ADR) {
+  if (inst.id == AARCH64_INS_ADR) {
     // The assembler does not allow :got: on adr instructions, but sometimes
     // it substitutes an adrp x0, :got:symbol for an adr instruction. In order
     // to print something that can be reassembled, reverse this substitution
@@ -397,59 +409,73 @@ void Arm64PrettyPrinter::printInstruction(std::ostream& os,
 void Arm64PrettyPrinter::printOperandList(std::ostream& os,
                                           const gtirb::CodeBlock& block,
                                           const cs_insn& inst) {
-  cs_arm64& detail = inst.detail->arm64;
+  cs_aarch64& detail = inst.detail->aarch64;
   int opCount = detail.op_count;
 
-  // Capstone 5 retains PRFM's operation in op_str, but may omit it from the
+  // Capstone may keep PRFM's operation only in op_str and omit it from the
   // detailed operand array. Recover the architectural PRFOP field from the
   // instruction word so the emitted instruction remains assembleable.
   bool InjectedPrefetch = false;
   bool HasPrefetch = false;
   for (int I = 0; I < opCount; ++I) {
-    HasPrefetch |= detail.operands[I].type == ARM64_OP_PREFETCH;
+    HasPrefetch |= detail.operands[I].type == AARCH64_OP_SYSALIAS &&
+                   detail.operands[I].sysop.sub_type == AARCH64_OP_PRFM;
   }
-  if (inst.id == ARM64_INS_PRFM && !HasPrefetch) {
+  if (inst.id == AARCH64_INS_PRFM && !HasPrefetch) {
     assert(inst.size == 4 && "unexpected AArch64 PRFM size");
     const uint32_t Word = static_cast<uint32_t>(inst.bytes[0]) |
                           (static_cast<uint32_t>(inst.bytes[1]) << 8) |
                           (static_cast<uint32_t>(inst.bytes[2]) << 16) |
                           (static_cast<uint32_t>(inst.bytes[3]) << 24);
-    printOpPrefetch(
-        os, static_cast<arm64_prefetch_op>((Word & 0x1fU) + 1U));
+    printOpPrefetch(os, Word & 0x1fU);
     InjectedPrefetch = true;
   }
 
-  const static std::map<arm64_insn, uint8_t> Groupings = {
-      {ARM64_INS_LD1, 0},     {ARM64_INS_LD1B, 0},    {ARM64_INS_LD1D, 0},
-      {ARM64_INS_LD1H, 0},    {ARM64_INS_LD1R, 0},    {ARM64_INS_LD1RB, 0},
-      {ARM64_INS_LD1RD, 0},   {ARM64_INS_LD1RH, 0},   {ARM64_INS_LD1RQB, 0},
-      {ARM64_INS_LD1RQD, 0},  {ARM64_INS_LD1RQH, 0},  {ARM64_INS_LD1RQW, 0},
-      {ARM64_INS_LD1RSB, 0},  {ARM64_INS_LD1RSH, 0},  {ARM64_INS_LD1RSW, 0},
-      {ARM64_INS_LD1RW, 0},   {ARM64_INS_LD1SB, 0},   {ARM64_INS_LD1SH, 0},
-      {ARM64_INS_LD1SW, 0},   {ARM64_INS_LD1W, 0},    {ARM64_INS_LD2, 0},
-      {ARM64_INS_LD2B, 0},    {ARM64_INS_LD2D, 0},    {ARM64_INS_LD2H, 0},
-      {ARM64_INS_LD2R, 0},    {ARM64_INS_LD2W, 0},    {ARM64_INS_LD3, 0},
-      {ARM64_INS_LD3B, 0},    {ARM64_INS_LD3D, 0},    {ARM64_INS_LD3H, 0},
-      {ARM64_INS_LD3R, 0},    {ARM64_INS_LD3W, 0},    {ARM64_INS_LD4, 0},
-      {ARM64_INS_LD4B, 0},    {ARM64_INS_LD4D, 0},    {ARM64_INS_LD4H, 0},
-      {ARM64_INS_LD4R, 0},    {ARM64_INS_LD4W, 0},    {ARM64_INS_LDFF1B, 0},
-      {ARM64_INS_LDFF1D, 0},  {ARM64_INS_LDFF1H, 0},  {ARM64_INS_LDFF1SB, 0},
-      {ARM64_INS_LDFF1SH, 0}, {ARM64_INS_LDFF1SW, 0}, {ARM64_INS_LDFF1W, 0},
-      {ARM64_INS_LDNF1B, 0},  {ARM64_INS_LDNF1D, 0},  {ARM64_INS_LDNF1H, 0},
-      {ARM64_INS_LDNF1SB, 0}, {ARM64_INS_LDNF1SH, 0}, {ARM64_INS_LDNF1SW, 0},
-      {ARM64_INS_LDNF1W, 0},  {ARM64_INS_LDNT1B, 0},  {ARM64_INS_LDNT1D, 0},
-      {ARM64_INS_LDNT1H, 0},  {ARM64_INS_LDNT1W, 0},  {ARM64_INS_ST1, 0},
-      {ARM64_INS_ST2, 0},     {ARM64_INS_ST3, 0},     {ARM64_INS_ST4, 0},
-      {ARM64_INS_ST1B, 0},    {ARM64_INS_ST1D, 0},    {ARM64_INS_ST1H, 0},
-      {ARM64_INS_ST1W, 0},    {ARM64_INS_ST2B, 0},    {ARM64_INS_ST2D, 0},
-      {ARM64_INS_ST2H, 0},    {ARM64_INS_ST2W, 0},    {ARM64_INS_ST3B, 0},
-      {ARM64_INS_ST3D, 0},    {ARM64_INS_ST3H, 0},    {ARM64_INS_ST3W, 0},
-      {ARM64_INS_ST4B, 0},    {ARM64_INS_ST4D, 0},    {ARM64_INS_ST4H, 0},
-      {ARM64_INS_ST4W, 0},    {ARM64_INS_STNT1B, 0},  {ARM64_INS_STNT1D, 0},
-      {ARM64_INS_STNT1H, 0},  {ARM64_INS_STNT1W, 0},  {ARM64_INS_TBL, 1}};
+  const static std::map<aarch64_insn, uint8_t> Groupings = {
+      {AARCH64_INS_LD1, 0},     {AARCH64_INS_LD1B, 0},
+      {AARCH64_INS_LD1D, 0},    {AARCH64_INS_LD1H, 0},
+      {AARCH64_INS_LD1R, 0},    {AARCH64_INS_LD1RB, 0},
+      {AARCH64_INS_LD1RD, 0},   {AARCH64_INS_LD1RH, 0},
+      {AARCH64_INS_LD1RQB, 0},  {AARCH64_INS_LD1RQD, 0},
+      {AARCH64_INS_LD1RQH, 0},  {AARCH64_INS_LD1RQW, 0},
+      {AARCH64_INS_LD1RSB, 0},  {AARCH64_INS_LD1RSH, 0},
+      {AARCH64_INS_LD1RSW, 0},  {AARCH64_INS_LD1RW, 0},
+      {AARCH64_INS_LD1SB, 0},   {AARCH64_INS_LD1SH, 0},
+      {AARCH64_INS_LD1SW, 0},   {AARCH64_INS_LD1W, 0},
+      {AARCH64_INS_LD2, 0},     {AARCH64_INS_LD2B, 0},
+      {AARCH64_INS_LD2D, 0},    {AARCH64_INS_LD2H, 0},
+      {AARCH64_INS_LD2R, 0},    {AARCH64_INS_LD2W, 0},
+      {AARCH64_INS_LD3, 0},     {AARCH64_INS_LD3B, 0},
+      {AARCH64_INS_LD3D, 0},    {AARCH64_INS_LD3H, 0},
+      {AARCH64_INS_LD3R, 0},    {AARCH64_INS_LD3W, 0},
+      {AARCH64_INS_LD4, 0},     {AARCH64_INS_LD4B, 0},
+      {AARCH64_INS_LD4D, 0},    {AARCH64_INS_LD4H, 0},
+      {AARCH64_INS_LD4R, 0},    {AARCH64_INS_LD4W, 0},
+      {AARCH64_INS_LDFF1B, 0},  {AARCH64_INS_LDFF1D, 0},
+      {AARCH64_INS_LDFF1H, 0},  {AARCH64_INS_LDFF1SB, 0},
+      {AARCH64_INS_LDFF1SH, 0}, {AARCH64_INS_LDFF1SW, 0},
+      {AARCH64_INS_LDFF1W, 0},  {AARCH64_INS_LDNF1B, 0},
+      {AARCH64_INS_LDNF1D, 0},  {AARCH64_INS_LDNF1H, 0},
+      {AARCH64_INS_LDNF1SB, 0}, {AARCH64_INS_LDNF1SH, 0},
+      {AARCH64_INS_LDNF1SW, 0}, {AARCH64_INS_LDNF1W, 0},
+      {AARCH64_INS_LDNT1B, 0},  {AARCH64_INS_LDNT1D, 0},
+      {AARCH64_INS_LDNT1H, 0},  {AARCH64_INS_LDNT1W, 0},
+      {AARCH64_INS_ST1, 0},     {AARCH64_INS_ST2, 0},
+      {AARCH64_INS_ST3, 0},     {AARCH64_INS_ST4, 0},
+      {AARCH64_INS_ST1B, 0},    {AARCH64_INS_ST1D, 0},
+      {AARCH64_INS_ST1H, 0},    {AARCH64_INS_ST1W, 0},
+      {AARCH64_INS_ST2B, 0},    {AARCH64_INS_ST2D, 0},
+      {AARCH64_INS_ST2H, 0},    {AARCH64_INS_ST2W, 0},
+      {AARCH64_INS_ST3B, 0},    {AARCH64_INS_ST3D, 0},
+      {AARCH64_INS_ST3H, 0},    {AARCH64_INS_ST3W, 0},
+      {AARCH64_INS_ST4B, 0},    {AARCH64_INS_ST4D, 0},
+      {AARCH64_INS_ST4H, 0},    {AARCH64_INS_ST4W, 0},
+      {AARCH64_INS_STNT1B, 0},  {AARCH64_INS_STNT1D, 0},
+      {AARCH64_INS_STNT1H, 0},  {AARCH64_INS_STNT1W, 0},
+      {AARCH64_INS_TBL, 1}};
 
   std::optional<uint8_t> GroupingStart;
-  if (auto It = Groupings.find(static_cast<arm64_insn>(inst.id));
+  if (auto It = Groupings.find(static_cast<aarch64_insn>(inst.id));
       It != Groupings.end()) {
     GroupingStart = It->second;
   }
@@ -469,7 +495,7 @@ void Arm64PrettyPrinter::printOperandList(std::ostream& os,
     if (IsPrintingGroupedOperands) {
       uint8_t offset = 0;
 
-      if (static_cast<arm64_insn>(inst.id) == ARM64_INS_TBL) {
+      if (static_cast<aarch64_insn>(inst.id) == AARCH64_INS_TBL) {
         // Special case: TBL instructions have a trailing ungrouped operand.
         offset = 1;
       }
@@ -478,8 +504,9 @@ void Arm64PrettyPrinter::printOperandList(std::ostream& os,
       // Close the grouping when we find an operand that does not match this,
       // or if there are no more operands.
       if (i + 1 + offset < opCount) {
-        cs_arm64_op& nextOp = inst.detail->arm64.operands[i + 1];
-        if (nextOp.type != ARM64_OP_REG || nextOp.vas == ARM64_VAS_INVALID) {
+        cs_aarch64_op& nextOp = inst.detail->aarch64.operands[i + 1];
+        if (nextOp.type != AARCH64_OP_REG ||
+            nextOp.vas == AARCH64LAYOUT_INVALID) {
           IsPrintingGroupedOperands = false;
         }
       } else {
@@ -488,7 +515,7 @@ void Arm64PrettyPrinter::printOperandList(std::ostream& os,
 
       if (!IsPrintingGroupedOperands) {
         os << "}";
-        cs_arm64_op& op = inst.detail->arm64.operands[i];
+        cs_aarch64_op& op = inst.detail->aarch64.operands[i];
         if (op.vector_index != -1) {
           os << "[" << op.vector_index << "]";
         }
@@ -496,62 +523,64 @@ void Arm64PrettyPrinter::printOperandList(std::ostream& os,
     }
   }
 
-  auto arm64Cc2String = [](arm64_cc cc) {
+  auto arm64Cc2String = [](AArch64CC_CondCode cc) {
     switch (cc) {
-    case ARM64_CC_EQ:
+    case AArch64CC_EQ:
       return "eq";
-    case ARM64_CC_NE:
+    case AArch64CC_NE:
       return "ne";
-    case ARM64_CC_HS:
+    case AArch64CC_HS:
       return "hs";
-    case ARM64_CC_LO:
+    case AArch64CC_LO:
       return "lo";
-    case ARM64_CC_MI:
+    case AArch64CC_MI:
       return "mi";
-    case ARM64_CC_PL:
+    case AArch64CC_PL:
       return "pl";
-    case ARM64_CC_VS:
+    case AArch64CC_VS:
       return "vs";
-    case ARM64_CC_VC:
+    case AArch64CC_VC:
       return "vc";
-    case ARM64_CC_HI:
+    case AArch64CC_HI:
       return "hi";
-    case ARM64_CC_LS:
+    case AArch64CC_LS:
       return "ls";
-    case ARM64_CC_GE:
+    case AArch64CC_GE:
       return "ge";
-    case ARM64_CC_LT:
+    case AArch64CC_LT:
       return "lt";
-    case ARM64_CC_GT:
+    case AArch64CC_GT:
       return "gt";
-    case ARM64_CC_LE:
+    case AArch64CC_LE:
       return "le";
-    case ARM64_CC_AL:
+    case AArch64CC_AL:
       return "al";
     default:
-      assert(!"Invalid arm64_cc");
-      return "Invalid arm64_cc";
+      assert(!"Invalid AArch64CC_CondCode");
+      return "Invalid AArch64CC_CondCode";
     }
   };
 
   // This set of special cases is required to handle conditional operands,
   // which capstone does not represent as an explicit operand. See the capstone
   // issue: https://github.com/capstone-engine/capstone/issues/1889
-  auto isCondInstr = [](const arm64_insn opcode) {
-    static std::vector<arm64_insn> cond_instrs{
-        ARM64_INS_CCMN,   ARM64_INS_CCMP,  ARM64_INS_CINC,  ARM64_INS_CINV,
-        ARM64_INS_CNEG,   ARM64_INS_CSEL,  ARM64_INS_CSET,  ARM64_INS_CSETM,
-        ARM64_INS_CSINC,  ARM64_INS_CSINV, ARM64_INS_CSNEG, ARM64_INS_FCCMP,
-        ARM64_INS_FCCMPE, ARM64_INS_FCSEL,
+  // Capstone 6 reports the real instruction id: CINC, CSET (CSINC), CINV,
+  // CSETM (CSINV) and CNEG (CSNEG) are aliases whose alias details carry the
+  // alias's own condition, which is the one printed.
+  auto isCondInstr = [](const aarch64_insn opcode) {
+    static std::vector<aarch64_insn> cond_instrs{
+        AARCH64_INS_CCMN,  AARCH64_INS_CCMP,   AARCH64_INS_CSEL,
+        AARCH64_INS_CSINC, AARCH64_INS_CSINV,  AARCH64_INS_CSNEG,
+        AARCH64_INS_FCCMP, AARCH64_INS_FCCMPE, AARCH64_INS_FCSEL,
     };
 
     return (std::find(std::begin(cond_instrs), std::end(cond_instrs), opcode) !=
             std::end(cond_instrs));
   };
 
-  if (inst.detail->arm64.cc != ARM64_CC_INVALID &&
-      isCondInstr(static_cast<arm64_insn>(inst.id))) {
-    std::string cc = arm64Cc2String(inst.detail->arm64.cc);
+  if (inst.detail->aarch64.cc != AArch64CC_Invalid &&
+      isCondInstr(static_cast<aarch64_insn>(inst.id))) {
+    std::string cc = arm64Cc2String(inst.detail->aarch64.cc);
     os << ',' << cc;
   }
 }
@@ -560,46 +589,58 @@ void Arm64PrettyPrinter::printOperand(std::ostream& os,
                                       const gtirb::CodeBlock& block,
                                       const cs_insn& inst, uint64_t index) {
   gtirb::Addr ea(inst.address);
-  const cs_arm64_op& op = inst.detail->arm64.operands[index];
+  const cs_aarch64_op& op = inst.detail->aarch64.operands[index];
   const gtirb::SymbolicExpression* symbolic = nullptr;
-  bool finalOp = (index + 1 == inst.detail->arm64.op_count);
+  bool finalOp = (index + 1 == inst.detail->aarch64.op_count);
 
   switch (op.type) {
-  case ARM64_OP_REG:
+  case AARCH64_OP_REG:
     printOpRegdirect(os, inst, index);
     return;
-  case ARM64_OP_IMM:
+  case AARCH64_OP_IMM:
     if (finalOp) {
       uint64_t Offset = ea - *block.getByteInterval()->getAddress();
       symbolic = block.getByteInterval()->getSymbolicExpression(Offset);
     }
     printOpImmediate(os, symbolic, inst, index);
     return;
-  case ARM64_OP_MEM:
+  case AARCH64_OP_MEM:
     if (finalOp) {
       uint64_t Offset = ea - *block.getByteInterval()->getAddress();
       symbolic = block.getByteInterval()->getSymbolicExpression(Offset);
     }
     printOpIndirect(os, symbolic, inst, index);
     return;
-  case ARM64_OP_FP:
+  case AARCH64_OP_FP:
     os << "#" << std::scientific << std::setprecision(18) << op.fp;
     return;
-  case ARM64_OP_CIMM:
-  case ARM64_OP_REG_MRS:
-  case ARM64_OP_REG_MSR:
-  case ARM64_OP_PSTATE:
-  case ARM64_OP_SYS:
-    // Print the operand directly.
+  case AARCH64_OP_SYSALIAS:
+    // Capstone 6 reports barriers and prefetch operations as system aliases
+    // holding the raw architectural field.
+    if (op.sysop.sub_type == AARCH64_OP_DB) {
+      printOpBarrier(os, op.sysop.alias.db);
+      return;
+    }
+    if (op.sysop.sub_type == AARCH64_OP_PRFM) {
+      printOpPrefetch(os, op.sysop.alias.prfm);
+      return;
+    }
     printOpRawValue(os, inst, index);
     return;
-  case ARM64_OP_PREFETCH:
-    printOpPrefetch(os, op.prefetch);
+  case AARCH64_OP_CIMM:
+  case AARCH64_OP_REG_MRS:
+  case AARCH64_OP_REG_MSR:
+  case AARCH64_OP_SYSREG:
+  case AARCH64_OP_SYSIMM:
+  case AARCH64_OP_PRED:
+  case AARCH64_OP_SME:
+  case AARCH64_OP_IMM_RANGE:
+    // Print the operand directly (system registers, PSTATE fields, cache and
+    // TLB operations, and SVE/SME operands, which are printed as .inst unless
+    // they carry a relocation).
+    printOpRawValue(os, inst, index);
     return;
-  case ARM64_OP_BARRIER:
-    printOpBarrier(os, op.barrier);
-    return;
-  case ARM64_OP_INVALID:
+  case AARCH64_OP_INVALID:
   default:
     std::cerr << "invalid operand\n";
     exit(1);
@@ -626,12 +667,12 @@ void Arm64PrettyPrinter::printSymExprSuffix(
 
 void Arm64PrettyPrinter::printOpRegdirect(std::ostream& os, const cs_insn& inst,
                                           uint64_t index) {
-  assert(index < inst.detail->arm64.op_count &&
+  assert(index < inst.detail->aarch64.op_count &&
          "printOpRegdirect called with invalid register index");
-  const cs_arm64_op& op = inst.detail->arm64.operands[index];
-  assert(op.type == ARM64_OP_REG &&
+  const cs_aarch64_op& op = inst.detail->aarch64.operands[index];
+  assert(op.type == AARCH64_OP_REG &&
          "printOpRegdirect called without a register operand");
-  os << getRegisterName(op.reg);
+  os << getRegisterName(op);
 
   // Capstone does not always populate `vas` for instructions that reference
   // a single vector element (a "lane"), even though it always populates
@@ -650,12 +691,11 @@ void Arm64PrettyPrinter::printOpRegdirect(std::ostream& os, const cs_insn& inst,
   //   - if the sibling is itself a vector register with a known
   //     arrangement (e.g. DUP's destination), that arrangement's element
   //     size gives us the width.
-  if (op.vas == ARM64_VAS_INVALID && op.vector_index != -1 &&
-      op.reg >= ARM64_REG_V0 && op.reg <= ARM64_REG_V31) {
+  if (op.vas == AARCH64LAYOUT_INVALID && op.vector_index != -1 && op.is_vreg) {
     const char* suffix = inferredVectorLaneSuffix(inst, index);
     if (suffix[0] == '\0') {
       LOG_ERROR << "printOpRegdirect: could not infer lane width for "
-                << getRegisterName(op.reg) << "[" << op.vector_index
+                << getRegisterName(op) << "[" << op.vector_index
                 << "]; no usable sibling width/arrangement\n";
     }
 
@@ -666,40 +706,14 @@ void Arm64PrettyPrinter::printOpRegdirect(std::ostream& os, const cs_insn& inst,
       // Grouped operands print the index following the group.
       os << "[" << op.vector_index << "]";
     }
-  } else if (op.vas != ARM64_VAS_INVALID) {
-    auto arm64Vas2String = [](arm64_vas vas) {
-      switch (vas) {
-      case ARM64_VAS_16B:
-        return "16b";
-      case ARM64_VAS_8B:
-        return "8b";
-      case ARM64_VAS_4B:
-        return "4b";
-      case ARM64_VAS_1B:
-        return "b";
-      case ARM64_VAS_8H:
-        return "8h";
-      case ARM64_VAS_4H:
-        return "4h";
-      case ARM64_VAS_2H:
-        return "2h";
-      case ARM64_VAS_1H:
-        return "h";
-      case ARM64_VAS_4S:
-        return "4s";
-      case ARM64_VAS_2S:
-        return "2s";
-      case ARM64_VAS_1S:
-        return "s";
-      case ARM64_VAS_2D:
-        return "2d";
-      case ARM64_VAS_1D:
-        return "d";
-      case ARM64_VAS_1Q:
-        return "1q";
-      default:
-        return "";
-      }
+  } else if (op.vas != AARCH64LAYOUT_INVALID &&
+             op.vas != AARCH64LAYOUT_VL_COMPLETE) {
+    // Arrangement (lanes, element size); a single indexed element has zero
+    // lanes and prints only its element size (".d[1]").
+    auto arm64Vas2String = [](AArch64Layout_VectorLayout vas) {
+      const unsigned int Lanes = static_cast<unsigned int>(vas) >> 8;
+      std::string Element = vectorElementSuffix(vas);
+      return Lanes == 0 ? Element : std::to_string(Lanes) + Element;
     };
 
     os << "." << arm64Vas2String(op.vas);
@@ -711,19 +725,24 @@ void Arm64PrettyPrinter::printOpRegdirect(std::ostream& os, const cs_insn& inst,
     }
   }
 
-  auto arm64Shifter2String = [](arm64_shifter sft) {
+  auto arm64Shifter2String = [](aarch64_shifter sft) {
     switch (sft) {
-    case ARM64_SFT_INVALID:
+    case AARCH64_SFT_INVALID:
       return "";
-    case ARM64_SFT_ASR:
+    case AARCH64_SFT_ASR:
+    case AARCH64_SFT_ASR_REG:
       return "asr";
-    case ARM64_SFT_LSL:
+    case AARCH64_SFT_LSL:
+    case AARCH64_SFT_LSL_REG:
       return "lsl";
-    case ARM64_SFT_LSR:
+    case AARCH64_SFT_LSR:
+    case AARCH64_SFT_LSR_REG:
       return "lsr";
-    case ARM64_SFT_MSL:
+    case AARCH64_SFT_MSL:
+    case AARCH64_SFT_MSL_REG:
       return "msl";
-    case ARM64_SFT_ROR:
+    case AARCH64_SFT_ROR:
+    case AARCH64_SFT_ROR_REG:
       return "ror";
     default:
       return "";
@@ -731,20 +750,21 @@ void Arm64PrettyPrinter::printOpRegdirect(std::ostream& os, const cs_insn& inst,
   };
 
   // Add extender if needed.
-  if (op.ext != ARM64_EXT_INVALID) {
+  if (op.ext != AARCH64_EXT_INVALID) {
     os << ", ";
     printExtender(os, op.ext, op.shift.type, op.shift.value);
   } else {
     std::string opcode = ascii_str_tolower(inst.mnemonic);
     opcode = opcode.substr(0, 3);
-    if (op.shift.type != ARM64_SFT_INVALID && op.shift.value != 0) {
+    if (op.shift.type != AARCH64_SFT_INVALID && op.shift.value != 0) {
       os << ", ";
       // In case where opcode is the same as one of arm64_shifters (e.g., lsl),
       // do not print it again here.
       std::string shift_type = arm64Shifter2String(op.shift.type);
       if (shift_type != opcode)
         os << shift_type << " ";
-      if (op.shift.value >= 64)
+      // A shift by a register (Capstone 6 *_REG types) holds the register.
+      if (op.shift.type >= AARCH64_SFT_LSL_REG)
         os << getRegisterName(op.shift.value);
       else
         os << "#" << op.shift.value;
@@ -755,8 +775,8 @@ void Arm64PrettyPrinter::printOpRegdirect(std::ostream& os, const cs_insn& inst,
 void Arm64PrettyPrinter::printOpImmediate(
     std::ostream& os, const gtirb::SymbolicExpression* symbolic,
     const cs_insn& inst, uint64_t index) {
-  const cs_arm64_op& op = inst.detail->arm64.operands[index];
-  assert(op.type == ARM64_OP_IMM &&
+  const cs_aarch64_op& op = inst.detail->aarch64.operands[index];
+  assert(op.type == AARCH64_OP_IMM &&
          "printOpImmediate called without an immediate operand");
 
   if (const auto* s = std::get_if<gtirb::SymAddrConst>(symbolic)) {
@@ -782,7 +802,7 @@ void Arm64PrettyPrinter::printOpImmediate(
         os << "#:abs_g3:";
       this->printSymbolicExpression(os, s, true);
     } else {
-      bool is_jump = cs_insn_group(this->csHandle, &inst, ARM64_GRP_JUMP);
+      bool is_jump = cs_insn_group(this->csHandle, &inst, AARCH64_GRP_JUMP);
       if (!is_jump) {
         os << ' ';
       }
@@ -792,7 +812,7 @@ void Arm64PrettyPrinter::printOpImmediate(
     printSymbolicExpression(os, sa, true);
   } else {
     os << "#" << op.imm;
-    if (op.shift.type != ARM64_SFT_INVALID && op.shift.value != 0) {
+    if (op.shift.type != AARCH64_SFT_INVALID && op.shift.value != 0) {
       os << ",";
       printShift(os, op.shift.type, op.shift.value);
     }
@@ -802,9 +822,9 @@ void Arm64PrettyPrinter::printOpImmediate(
 void Arm64PrettyPrinter::printOpIndirect(
     std::ostream& os, const gtirb::SymbolicExpression* symbolic,
     const cs_insn& inst, uint64_t index) {
-  const cs_arm64& detail = inst.detail->arm64;
-  const cs_arm64_op& op = detail.operands[index];
-  assert(op.type == ARM64_OP_MEM &&
+  const cs_aarch64& detail = inst.detail->aarch64;
+  const cs_aarch64_op& op = detail.operands[index];
+  assert(op.type == AARCH64_OP_MEM &&
          "printOpIndirect called without a memory operand");
 
   bool first = true;
@@ -812,7 +832,7 @@ void Arm64PrettyPrinter::printOpIndirect(
   os << "[";
 
   // Base register
-  if (op.mem.base != ARM64_REG_INVALID) {
+  if (op.mem.base != AARCH64_REG_INVALID) {
     first = false;
     os << getRegisterName(op.mem.base);
   }
@@ -836,7 +856,7 @@ void Arm64PrettyPrinter::printOpIndirect(
   }
 
   // Index register
-  if (op.mem.index != ARM64_REG_INVALID) {
+  if (op.mem.index != AARCH64_REG_INVALID) {
     if (!first) {
       os << ",";
     }
@@ -845,10 +865,10 @@ void Arm64PrettyPrinter::printOpIndirect(
   }
 
   // Add extend / shift
-  if (op.ext != ARM64_EXT_INVALID) {
+  if (op.ext != AARCH64_EXT_INVALID) {
     os << ",";
     printExtender(os, op.ext, op.shift.type, op.shift.value);
-  } else if (op.shift.type != ARM64_SFT_INVALID && op.shift.value != 0) {
+  } else if (op.shift.type != AARCH64_SFT_INVALID && op.shift.value != 0) {
     os << ",";
     assert(!first && "unexpected shift operator");
     printShift(os, op.shift.type, op.shift.value);
@@ -856,7 +876,7 @@ void Arm64PrettyPrinter::printOpIndirect(
 
   os << "]";
 
-  if (detail.writeback && index + 1 == detail.op_count) {
+  if (inst.detail->writeback && index + 1 == detail.op_count) {
     os << "!";
   }
 }
@@ -914,45 +934,45 @@ void Arm64PrettyPrinter::printOpRawValue(std::ostream& os, const cs_insn& inst,
 }
 
 void Arm64PrettyPrinter::printOpBarrier(std::ostream& os,
-                                        const arm64_barrier_op barrier) {
+                                        unsigned int barrier) {
+  // Raw CRm field (AARCH64_DB_*, the values Capstone 5 used as well).
   switch (barrier) {
-  case ARM64_BARRIER_OSHLD:
+  case AARCH64_DB_OSHLD:
     os << "oshld";
     return;
-  case ARM64_BARRIER_OSHST:
+  case AARCH64_DB_OSHST:
     os << "oshst";
     return;
-  case ARM64_BARRIER_OSH:
+  case AARCH64_DB_OSH:
     os << "osh";
     return;
-  case ARM64_BARRIER_NSHLD:
+  case AARCH64_DB_NSHLD:
     os << "nshld";
     return;
-  case ARM64_BARRIER_NSHST:
+  case AARCH64_DB_NSHST:
     os << "nshst";
     return;
-  case ARM64_BARRIER_NSH:
+  case AARCH64_DB_NSH:
     os << "nsh";
     return;
-  case ARM64_BARRIER_ISHLD:
+  case AARCH64_DB_ISHLD:
     os << "ishld";
     return;
-  case ARM64_BARRIER_ISHST:
+  case AARCH64_DB_ISHST:
     os << "ishst";
     return;
-  case ARM64_BARRIER_ISH:
+  case AARCH64_DB_ISH:
     os << "ish";
     return;
-  case ARM64_BARRIER_LD:
+  case AARCH64_DB_LD:
     os << "ld";
     return;
-  case ARM64_BARRIER_ST:
+  case AARCH64_DB_ST:
     os << "st";
     return;
-  case ARM64_BARRIER_SY:
+  case AARCH64_DB_SY:
     os << "sy";
     return;
-  case ARM64_BARRIER_INVALID:
   default:
     std::cerr << "invalid operand\n";
     exit(1);
@@ -960,69 +980,70 @@ void Arm64PrettyPrinter::printOpBarrier(std::ostream& os,
 }
 
 void Arm64PrettyPrinter::printOpPrefetch(std::ostream& os,
-                                         const arm64_prefetch_op prefetch) {
+                                         unsigned int prefetch) {
+  // Raw five-bit PRFOP field (Capstone 6 AARCH64_PRFM_* are 0-based; Capstone
+  // 5's ARM64_PRFM_* were the same values plus one).
   switch (prefetch) {
-  case ARM64_PRFM_PLDL1KEEP:
+  case AARCH64_PRFM_PLDL1KEEP:
     os << "pldl1keep";
     return;
-  case ARM64_PRFM_PLDL1STRM:
+  case AARCH64_PRFM_PLDL1STRM:
     os << "pldl1strm";
     return;
-  case ARM64_PRFM_PLDL2KEEP:
+  case AARCH64_PRFM_PLDL2KEEP:
     os << "pldl2keep";
     return;
-  case ARM64_PRFM_PLDL2STRM:
+  case AARCH64_PRFM_PLDL2STRM:
     os << "pldl2strm";
     return;
-  case ARM64_PRFM_PLDL3KEEP:
+  case AARCH64_PRFM_PLDL3KEEP:
     os << "pldl3keep";
     return;
-  case ARM64_PRFM_PLDL3STRM:
+  case AARCH64_PRFM_PLDL3STRM:
     os << "pldl3strm";
     return;
-  case ARM64_PRFM_PLIL1KEEP:
+  case AARCH64_PRFM_PLIL1KEEP:
     os << "plil1keep";
     return;
-  case ARM64_PRFM_PLIL1STRM:
+  case AARCH64_PRFM_PLIL1STRM:
     os << "plil1strm";
     return;
-  case ARM64_PRFM_PLIL2KEEP:
+  case AARCH64_PRFM_PLIL2KEEP:
     os << "plil2keep";
     return;
-  case ARM64_PRFM_PLIL2STRM:
+  case AARCH64_PRFM_PLIL2STRM:
     os << "plil2strm";
     return;
-  case ARM64_PRFM_PLIL3KEEP:
+  case AARCH64_PRFM_PLIL3KEEP:
     os << "plil3keep";
     return;
-  case ARM64_PRFM_PLIL3STRM:
+  case AARCH64_PRFM_PLIL3STRM:
     os << "plil3strm";
     return;
-  case ARM64_PRFM_PSTL1KEEP:
+  case AARCH64_PRFM_PSTL1KEEP:
     os << "pstl1keep";
     return;
-  case ARM64_PRFM_PSTL1STRM:
+  case AARCH64_PRFM_PSTL1STRM:
     os << "pstl1strm";
     return;
-  case ARM64_PRFM_PSTL2KEEP:
+  case AARCH64_PRFM_PSTL2KEEP:
     os << "pstl2keep";
     return;
-  case ARM64_PRFM_PSTL2STRM:
+  case AARCH64_PRFM_PSTL2STRM:
     os << "pstl2strm";
     return;
-  case ARM64_PRFM_PSTL3KEEP:
+  case AARCH64_PRFM_PSTL3KEEP:
     os << "pstl3keep";
     return;
-  case ARM64_PRFM_PSTL3STRM:
+  case AARCH64_PRFM_PSTL3STRM:
     os << "pstl3strm";
     return;
-  case ARM64_PRFM_INVALID:
   default:
-    // Capstone's enum names only the architecturally assigned PRFOP values,
-    // while the instruction field itself permits the full five-bit range.
-    // GNU as accepts the remaining values as an immediate operand.
-    if (prefetch > ARM64_PRFM_INVALID && prefetch <= 0x1f + 1) {
-      os << "#" << (static_cast<unsigned int>(prefetch) - 1U);
+    // The names above are the operations Capstone 5 named; the instruction
+    // field itself permits the full five-bit range, and GNU as accepts the
+    // remaining values as an immediate operand.
+    if (prefetch <= 0x1f) {
+      os << "#" << prefetch;
       return;
     }
     std::cerr << "invalid operand\n";
@@ -1030,22 +1051,23 @@ void Arm64PrettyPrinter::printOpPrefetch(std::ostream& os,
   }
 }
 
-void Arm64PrettyPrinter::printShift(std::ostream& os, const arm64_shifter type,
+void Arm64PrettyPrinter::printShift(std::ostream& os,
+                                    const aarch64_shifter type,
                                     unsigned int value) {
   switch (type) {
-  case ARM64_SFT_LSL:
+  case AARCH64_SFT_LSL:
     os << "lsl";
     break;
-  case ARM64_SFT_MSL:
+  case AARCH64_SFT_MSL:
     os << "msl";
     break;
-  case ARM64_SFT_LSR:
+  case AARCH64_SFT_LSR:
     os << "lsr";
     break;
-  case ARM64_SFT_ASR:
+  case AARCH64_SFT_ASR:
     os << "asr";
     break;
-  case ARM64_SFT_ROR:
+  case AARCH64_SFT_ROR:
     os << "ror";
     break;
   default:
@@ -1055,39 +1077,39 @@ void Arm64PrettyPrinter::printShift(std::ostream& os, const arm64_shifter type,
 }
 
 void Arm64PrettyPrinter::printExtender(std::ostream& os,
-                                       const arm64_extender& ext,
-                                       const arm64_shifter shiftType,
+                                       const aarch64_extender& ext,
+                                       const aarch64_shifter shiftType,
                                        uint64_t shiftValue) {
   switch (ext) {
-  case ARM64_EXT_UXTB:
+  case AARCH64_EXT_UXTB:
     os << "uxtb";
     break;
-  case ARM64_EXT_UXTH:
+  case AARCH64_EXT_UXTH:
     os << "uxth";
     break;
-  case ARM64_EXT_UXTW:
+  case AARCH64_EXT_UXTW:
     os << "uxtw";
     break;
-  case ARM64_EXT_UXTX:
+  case AARCH64_EXT_UXTX:
     os << "uxtx";
     break;
-  case ARM64_EXT_SXTB:
+  case AARCH64_EXT_SXTB:
     os << "sxtb";
     break;
-  case ARM64_EXT_SXTH:
+  case AARCH64_EXT_SXTH:
     os << "sxth";
     break;
-  case ARM64_EXT_SXTW:
+  case AARCH64_EXT_SXTW:
     os << "sxtw";
     break;
-  case ARM64_EXT_SXTX:
+  case AARCH64_EXT_SXTX:
     os << "sxtx";
     break;
   default:
     assert(false && "unexpected case");
   }
-  if (shiftType != ARM64_SFT_INVALID) {
-    assert(shiftType == ARM64_SFT_LSL && "unexpected shift type in extender");
+  if (shiftType != AARCH64_SFT_INVALID) {
+    assert(shiftType == AARCH64_SFT_LSL && "unexpected shift type in extender");
     os << " #" << shiftValue;
   }
 }

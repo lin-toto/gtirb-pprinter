@@ -87,11 +87,11 @@ static bool isLoadReserved(unsigned int Id) {
   switch (Id) {
   case RISCV_INS_LR_D:
   case RISCV_INS_LR_D_AQ:
-  case RISCV_INS_LR_D_AQ_RL:
+  case RISCV_INS_LR_D_AQRL:
   case RISCV_INS_LR_D_RL:
   case RISCV_INS_LR_W:
   case RISCV_INS_LR_W_AQ:
-  case RISCV_INS_LR_W_AQ_RL:
+  case RISCV_INS_LR_W_AQRL:
   case RISCV_INS_LR_W_RL:
     return true;
   default:
@@ -103,83 +103,83 @@ static bool isStoreConditionalOrAtomic(unsigned int Id) {
   switch (Id) {
   case RISCV_INS_AMOADD_D:
   case RISCV_INS_AMOADD_D_AQ:
-  case RISCV_INS_AMOADD_D_AQ_RL:
+  case RISCV_INS_AMOADD_D_AQRL:
   case RISCV_INS_AMOADD_D_RL:
   case RISCV_INS_AMOADD_W:
   case RISCV_INS_AMOADD_W_AQ:
-  case RISCV_INS_AMOADD_W_AQ_RL:
+  case RISCV_INS_AMOADD_W_AQRL:
   case RISCV_INS_AMOADD_W_RL:
   case RISCV_INS_AMOAND_D:
   case RISCV_INS_AMOAND_D_AQ:
-  case RISCV_INS_AMOAND_D_AQ_RL:
+  case RISCV_INS_AMOAND_D_AQRL:
   case RISCV_INS_AMOAND_D_RL:
   case RISCV_INS_AMOAND_W:
   case RISCV_INS_AMOAND_W_AQ:
-  case RISCV_INS_AMOAND_W_AQ_RL:
+  case RISCV_INS_AMOAND_W_AQRL:
   case RISCV_INS_AMOAND_W_RL:
   case RISCV_INS_AMOMAX_D:
   case RISCV_INS_AMOMAX_D_AQ:
-  case RISCV_INS_AMOMAX_D_AQ_RL:
+  case RISCV_INS_AMOMAX_D_AQRL:
   case RISCV_INS_AMOMAX_D_RL:
   case RISCV_INS_AMOMAX_W:
   case RISCV_INS_AMOMAX_W_AQ:
-  case RISCV_INS_AMOMAX_W_AQ_RL:
+  case RISCV_INS_AMOMAX_W_AQRL:
   case RISCV_INS_AMOMAX_W_RL:
   case RISCV_INS_AMOMAXU_D:
   case RISCV_INS_AMOMAXU_D_AQ:
-  case RISCV_INS_AMOMAXU_D_AQ_RL:
+  case RISCV_INS_AMOMAXU_D_AQRL:
   case RISCV_INS_AMOMAXU_D_RL:
   case RISCV_INS_AMOMAXU_W:
   case RISCV_INS_AMOMAXU_W_AQ:
-  case RISCV_INS_AMOMAXU_W_AQ_RL:
+  case RISCV_INS_AMOMAXU_W_AQRL:
   case RISCV_INS_AMOMAXU_W_RL:
   case RISCV_INS_AMOMIN_D:
   case RISCV_INS_AMOMIN_D_AQ:
-  case RISCV_INS_AMOMIN_D_AQ_RL:
+  case RISCV_INS_AMOMIN_D_AQRL:
   case RISCV_INS_AMOMIN_D_RL:
   case RISCV_INS_AMOMIN_W:
   case RISCV_INS_AMOMIN_W_AQ:
-  case RISCV_INS_AMOMIN_W_AQ_RL:
+  case RISCV_INS_AMOMIN_W_AQRL:
   case RISCV_INS_AMOMIN_W_RL:
   case RISCV_INS_AMOMINU_D:
   case RISCV_INS_AMOMINU_D_AQ:
-  case RISCV_INS_AMOMINU_D_AQ_RL:
+  case RISCV_INS_AMOMINU_D_AQRL:
   case RISCV_INS_AMOMINU_D_RL:
   case RISCV_INS_AMOMINU_W:
   case RISCV_INS_AMOMINU_W_AQ:
-  case RISCV_INS_AMOMINU_W_AQ_RL:
+  case RISCV_INS_AMOMINU_W_AQRL:
   case RISCV_INS_AMOMINU_W_RL:
   case RISCV_INS_AMOOR_D:
   case RISCV_INS_AMOOR_D_AQ:
-  case RISCV_INS_AMOOR_D_AQ_RL:
+  case RISCV_INS_AMOOR_D_AQRL:
   case RISCV_INS_AMOOR_D_RL:
   case RISCV_INS_AMOOR_W:
   case RISCV_INS_AMOOR_W_AQ:
-  case RISCV_INS_AMOOR_W_AQ_RL:
+  case RISCV_INS_AMOOR_W_AQRL:
   case RISCV_INS_AMOOR_W_RL:
   case RISCV_INS_AMOSWAP_D:
   case RISCV_INS_AMOSWAP_D_AQ:
-  case RISCV_INS_AMOSWAP_D_AQ_RL:
+  case RISCV_INS_AMOSWAP_D_AQRL:
   case RISCV_INS_AMOSWAP_D_RL:
   case RISCV_INS_AMOSWAP_W:
   case RISCV_INS_AMOSWAP_W_AQ:
-  case RISCV_INS_AMOSWAP_W_AQ_RL:
+  case RISCV_INS_AMOSWAP_W_AQRL:
   case RISCV_INS_AMOSWAP_W_RL:
   case RISCV_INS_AMOXOR_D:
   case RISCV_INS_AMOXOR_D_AQ:
-  case RISCV_INS_AMOXOR_D_AQ_RL:
+  case RISCV_INS_AMOXOR_D_AQRL:
   case RISCV_INS_AMOXOR_D_RL:
   case RISCV_INS_AMOXOR_W:
   case RISCV_INS_AMOXOR_W_AQ:
-  case RISCV_INS_AMOXOR_W_AQ_RL:
+  case RISCV_INS_AMOXOR_W_AQRL:
   case RISCV_INS_AMOXOR_W_RL:
   case RISCV_INS_SC_D:
   case RISCV_INS_SC_D_AQ:
-  case RISCV_INS_SC_D_AQ_RL:
+  case RISCV_INS_SC_D_AQRL:
   case RISCV_INS_SC_D_RL:
   case RISCV_INS_SC_W:
   case RISCV_INS_SC_W_AQ:
-  case RISCV_INS_SC_W_AQ_RL:
+  case RISCV_INS_SC_W_AQRL:
   case RISCV_INS_SC_W_RL:
     return true;
   default:
@@ -221,9 +221,7 @@ getTrailingRoundingMode(const cs_insn& Inst) {
   return std::nullopt;
 }
 
-static bool isGpRegister(unsigned int Reg) {
-  return Reg == RISCV_REG_GP;
-}
+static bool isGpRegister(unsigned int Reg) { return Reg == RISCV_REG_X3; }
 
 static bool isGpRelative(const gtirb::SymAddrAddr* SymExpr) {
   return SymExpr && SymExpr->Sym2 &&
@@ -444,7 +442,7 @@ RiscvPrettyPrinter::RiscvPrettyPrinter(gtirb::Context& context_,
     : ElfPrettyPrinter(context_, module_, syntax_, policy_) {
   unsigned int mode =
       getModuleISA(module_) == "riscv64" ? CS_MODE_RISCV64 : CS_MODE_RISCV32;
-  mode |= CS_MODE_RISCVC;
+  mode |= CS_MODE_RISCV_C;
 
   if (module_.getByteOrder() == gtirb::ByteOrder::Big) {
     mode |= CS_MODE_BIG_ENDIAN;
@@ -637,8 +635,9 @@ void RiscvPrettyPrinter::validatePcrelAnchors() const {
                                SAC->Sym->getName());
     }
     const cs_riscv& HighDetail = HighInsn->detail->riscv;
-    if (HighDetail.op_count < 1 || HighDetail.operands[0].type != RISCV_OP_REG ||
-        Source != HighDetail.operands[0].reg || Source == RISCV_REG_ZERO) {
+    if (HighDetail.op_count < 1 ||
+        HighDetail.operands[0].type != RISCV_OP_REG ||
+        Source != HighDetail.operands[0].reg || Source == RISCV_REG_X0) {
       throw std::runtime_error("RISC-V PC-relative LO source register does not match AUIPC: " +
                                SAC->Sym->getName());
     }
@@ -932,12 +931,12 @@ bool RiscvPrettyPrinter::printGpRelativeCopyRelocation(
     Out << '\n';
   };
 
-  if ((inst.id == RISCV_INS_ADDI || Opcode == "addi") &&
-      Detail.op_count == 3 && Detail.operands[0].type == RISCV_OP_REG &&
+  if ((inst.id == RISCV_INS_ADDI || Opcode == "addi") && Detail.op_count == 3 &&
+      Detail.operands[0].type == RISCV_OP_REG &&
       Detail.operands[1].type == RISCV_OP_REG &&
       Detail.operands[2].type == RISCV_OP_IMM &&
       isGpRegister(Detail.operands[1].reg) &&
-      Detail.operands[0].reg != RISCV_REG_ZERO) {
+      Detail.operands[0].reg != RISCV_REG_X0) {
     unsigned int Reg = Detail.operands[0].reg;
     PrintLui(os, Reg);
     PrintLoRegInstruction(os, "addi", Reg);
@@ -948,7 +947,7 @@ bool RiscvPrettyPrinter::printGpRelativeCopyRelocation(
       Detail.operands[0].type == RISCV_OP_REG &&
       Detail.operands[1].type == RISCV_OP_MEM &&
       isGpRegister(Detail.operands[1].mem.base) &&
-      Detail.operands[0].reg != RISCV_REG_ZERO) {
+      Detail.operands[0].reg != RISCV_REG_X0) {
     unsigned int Reg = Detail.operands[0].reg;
     PrintLui(os, Reg);
     PrintLoMemInstruction(os, Opcode.c_str(), Reg);
@@ -958,7 +957,7 @@ bool RiscvPrettyPrinter::printGpRelativeCopyRelocation(
   if (isCompressedIntegerLoad(inst.id) && hasCompressedMemoryOperand(inst) &&
       Detail.operands[0].type == RISCV_OP_REG &&
       isGpRegister(Detail.operands[2].reg) &&
-      Detail.operands[0].reg != RISCV_REG_ZERO) {
+      Detail.operands[0].reg != RISCV_REG_X0) {
     unsigned int Reg = Detail.operands[0].reg;
     PrintLui(os, Reg);
     PrintLoMemInstruction(os, getUncompressedMemoryOpcode(inst.id), Reg);
@@ -1056,7 +1055,7 @@ bool RiscvPrettyPrinter::isPltCall(const cs_insn& inst) const {
     return Mnemonic == "jal";
   }
   return Detail.op_count >= 2 && Detail.operands[0].type == RISCV_OP_REG &&
-         Detail.operands[0].reg == RISCV_REG_RA;
+         Detail.operands[0].reg == RISCV_REG_X1;
 }
 
 bool RiscvPrettyPrinter::isPltTailCall(const cs_insn& inst) const {
@@ -1069,7 +1068,7 @@ bool RiscvPrettyPrinter::isPltTailCall(const cs_insn& inst) const {
 
   return inst.id == RISCV_INS_JAL && Detail.op_count >= 2 &&
          Detail.operands[0].type == RISCV_OP_REG &&
-         Detail.operands[0].reg == RISCV_REG_ZERO;
+         Detail.operands[0].reg == RISCV_REG_X0;
 }
 
 std::optional<std::string>
@@ -1216,7 +1215,7 @@ bool RiscvPrettyPrinter::printPltCallRelocation(
 
   const cs_riscv& Detail = inst.detail->riscv;
   if (Detail.op_count < 2 || Detail.operands[0].type != RISCV_OP_REG ||
-      Detail.operands[0].reg != RISCV_REG_RA) {
+      Detail.operands[0].reg != RISCV_REG_X1) {
     return false;
   }
 
@@ -1252,7 +1251,7 @@ void RiscvPrettyPrinter::printOperandList(std::ostream& os,
     // expanded spelling while preserving calls versus tail jumps.
     const std::string Mnemonic = ascii_str_tolower(inst.mnemonic);
     const unsigned int Destination =
-        (Mnemonic == "jr" || Mnemonic == "c.jr") ? RISCV_REG_ZERO : RISCV_REG_RA;
+        (Mnemonic == "jr" || Mnemonic == "c.jr") ? RISCV_REG_X0 : RISCV_REG_X1;
     os << getRegisterName(Destination) << ',';
     printOperand(os, block, inst, 0);
     os << ',';

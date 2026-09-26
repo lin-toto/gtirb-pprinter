@@ -18,6 +18,7 @@
 #include "AuxDataUtils.hpp"
 #include "StringUtils.hpp"
 #include "driver/Logger.h"
+#include <cctype>
 #include <iostream>
 
 namespace gtirb_pprint {
@@ -171,57 +172,57 @@ void ArmPrettyPrinter::printBlockContents(std::ostream& Os,
   printCFIDirectives(Os, BlockOffset);
 }
 
-static std::string armCc2String(arm_cc CC, bool Upper = false) {
+static std::string armCc2String(ARMCC_CondCodes CC, bool Upper = false) {
   std::string Ans = "";
   switch (CC) {
-  case ARM_CC_EQ:
+  case ARMCC_EQ:
     Ans = "eq";
     break;
-  case ARM_CC_NE:
+  case ARMCC_NE:
     Ans = "ne";
     break;
-  case ARM_CC_HS:
+  case ARMCC_HS:
     Ans = "hs";
     break;
-  case ARM_CC_LO:
+  case ARMCC_LO:
     Ans = "lo";
     break;
-  case ARM_CC_MI:
+  case ARMCC_MI:
     Ans = "mi";
     break;
-  case ARM_CC_PL:
+  case ARMCC_PL:
     Ans = "pl";
     break;
-  case ARM_CC_VS:
+  case ARMCC_VS:
     Ans = "vs";
     break;
-  case ARM_CC_VC:
+  case ARMCC_VC:
     Ans = "vc";
     break;
-  case ARM_CC_HI:
+  case ARMCC_HI:
     Ans = "hi";
     break;
-  case ARM_CC_LS:
+  case ARMCC_LS:
     Ans = "ls";
     break;
-  case ARM_CC_GE:
+  case ARMCC_GE:
     Ans = "ge";
     break;
-  case ARM_CC_LT:
+  case ARMCC_LT:
     Ans = "lt";
     break;
-  case ARM_CC_GT:
+  case ARMCC_GT:
     Ans = "gt";
     break;
-  case ARM_CC_LE:
+  case ARMCC_LE:
     Ans = "le";
     break;
-  case ARM_CC_AL:
+  case ARMCC_AL:
     Ans = "al";
     break;
   default:
-    assert(!"Invalid arm_cc");
-    Ans = "Invalid arm_cc";
+    assert(!"Invalid ARMCC_CondCodes");
+    Ans = "Invalid ARMCC_CondCodes";
     break;
   }
   if (Upper) {
@@ -234,7 +235,7 @@ static void rewriteMnemonic(cs_insn& inst, const char* str) {
   cs_arm& Detail = inst.detail->arm;
   std::stringstream SS;
   SS << str;
-  if (Detail.cc != ARM_CC_AL) {
+  if (Detail.cc != ARMCC_AL) {
     std::string CC = armCc2String(Detail.cc, true);
     SS << CC;
   }
@@ -358,8 +359,14 @@ void ArmPrettyPrinter::printOperandList(std::ostream& os,
       ARM_INS_STM,     ARM_INS_STMDA,   ARM_INS_STMDB,  ARM_INS_STMIB,
       ARM_INS_FSTMDBX, ARM_INS_FSTMIAX, ARM_INS_VSTMDB, ARM_INS_VSTMIA};
 
-  static const std::set<arm_insn> PushPop = {ARM_INS_POP, ARM_INS_PUSH,
-                                             ARM_INS_VPOP, ARM_INS_VPUSH};
+  // Capstone 6 reports VPOP/VPUSH (and PUSH/POP in ARM mode) as aliases of
+  // the load/store-multiple instructions.
+  static const std::set<arm_insn> PushPop = {
+      ARM_INS_POP,        ARM_INS_PUSH,       ARM_INS_ALIAS_POP,
+      ARM_INS_ALIAS_PUSH, ARM_INS_ALIAS_VPOP, ARM_INS_ALIAS_VPUSH};
+  const bool IsPushPop =
+      PushPop.count(static_cast<arm_insn>(inst.id)) ||
+      (inst.is_alias && PushPop.count(static_cast<arm_insn>(inst.alias_id)));
 
   static const std::set<arm_insn> VldVst = {
       ARM_INS_VLD1, ARM_INS_VLD2, ARM_INS_VLD3, ARM_INS_VLD4,
@@ -381,7 +388,7 @@ void ArmPrettyPrinter::printOperandList(std::ostream& os,
           os << " :" << op.mem.disp;
         }
         os << "]";
-        if (detail.writeback) {
+        if (inst.detail->writeback) {
           os << "!";
         }
       } else {
@@ -396,9 +403,9 @@ void ArmPrettyPrinter::printOperandList(std::ostream& os,
 
   int RegBitVectorIndex = -1;
 
-  if (LdmStm.find(static_cast<arm_insn>(inst.id)) != LdmStm.end())
+  if (LdmStm.find(static_cast<arm_insn>(inst.id)) != LdmStm.end() && !IsPushPop)
     RegBitVectorIndex = 1;
-  if (PushPop.find(static_cast<arm_insn>(inst.id)) != PushPop.end())
+  if (IsPushPop)
     RegBitVectorIndex = 0;
 
   for (int i = 0; i < opCount; i++) {
@@ -409,7 +416,7 @@ void ArmPrettyPrinter::printOperandList(std::ostream& os,
       os << "{ ";
     printOperand(os, block, inst, i);
     if (LdmStm.find(static_cast<arm_insn>(inst.id)) != LdmStm.end() && i == 0 &&
-        detail.writeback) {
+        inst.detail->writeback) {
       os << "!";
     }
   }
@@ -502,166 +509,39 @@ void ArmPrettyPrinter::printOpRegdirect(std::ostream& os, const cs_insn& inst,
       return "lsr";
     case ARM_SFT_ROR_REG:
       return "ror";
-    case ARM_SFT_RRX_REG:
-      return "rrx";
     default:
       return "";
     }
   };
 
-  auto armSysReg2String = [](int sysreg) {
-    if (sysreg == ARM_SYSREG_INVALID) {
-      return std::string("INVALID");
-    } else if (sysreg < 16) {
-      std::string ret = "spsr_";
-      if (sysreg & ARM_SYSREG_SPSR_C)
-        ret += "c";
-      if (sysreg & ARM_SYSREG_SPSR_X)
-        ret += "x";
-      if (sysreg & ARM_SYSREG_SPSR_S)
-        ret += "s";
-      if (sysreg & ARM_SYSREG_SPSR_F)
-        ret += "f";
-      return ret;
-    } else if (sysreg < 256) {
-      std::string ret = "cpsr_";
-      if (sysreg & ARM_SYSREG_CPSR_C)
-        ret += "c";
-      if (sysreg & ARM_SYSREG_CPSR_X)
-        ret += "x";
-      if (sysreg & ARM_SYSREG_CPSR_S)
-        ret += "s";
-      if (sysreg & ARM_SYSREG_CPSR_F)
-        ret += "f";
-      return ret;
-    } else {
-      std::string ret;
-      switch (sysreg) {
-      case ARM_SYSREG_APSR:
-        ret = "apsr";
-        break;
-      case ARM_SYSREG_APSR_G:
-        ret = "apsr_g";
-        break;
-      case ARM_SYSREG_APSR_NZCVQ:
-        ret = "apsr_nzcvq";
-        break;
-      case ARM_SYSREG_APSR_NZCVQG:
-        ret = "apsr_nzcvqg";
-        break;
-      case ARM_SYSREG_IAPSR:
-        ret = "iapsr";
-        break;
-      case ARM_SYSREG_IAPSR_G:
-        ret = "iapsr_g";
-        break;
-      case ARM_SYSREG_IAPSR_NZCVQG:
-        ret = "iapsr_nzcvqg";
-        break;
-      case ARM_SYSREG_IAPSR_NZCVQ:
-        ret = "iapsr_nzcvq";
-        break;
-      case ARM_SYSREG_EAPSR:
-        ret = "eapsr";
-        break;
-      case ARM_SYSREG_EAPSR_G:
-        ret = "eapsr_g";
-        break;
-      case ARM_SYSREG_EAPSR_NZCVQG:
-        ret = "eapsr_nzcvqg";
-        break;
-      case ARM_SYSREG_EAPSR_NZCVQ:
-        ret = "eapsr_nzcvq";
-        break;
-      case ARM_SYSREG_XPSR:
-        ret = "xpsr";
-        break;
-      case ARM_SYSREG_XPSR_G:
-        ret = "xpsr_g";
-        break;
-      case ARM_SYSREG_XPSR_NZCVQG:
-        ret = "xpsr_nzcvqg";
-        break;
-      case ARM_SYSREG_XPSR_NZCVQ:
-        ret = "xpsr_nzcvq";
-        break;
-      case ARM_SYSREG_IPSR:
-        ret = "ipsr";
-        break;
-      case ARM_SYSREG_EPSR:
-        ret = "epsr";
-        break;
-      case ARM_SYSREG_IEPSR:
-        ret = "iepsr";
-        break;
-      case ARM_SYSREG_MSP:
-        ret = "msp";
-        break;
-      case ARM_SYSREG_PSP:
-        ret = "psp";
-        break;
-      case ARM_SYSREG_PRIMASK:
-        ret = "primask";
-        break;
-      case ARM_SYSREG_BASEPRI:
-        ret = "basepri";
-        break;
-      case ARM_SYSREG_BASEPRI_MAX:
-        ret = "basepri_max";
-        break;
-      case ARM_SYSREG_FAULTMASK:
-        ret = "faultmask";
-        break;
-      case ARM_SYSREG_CONTROL:
-        ret = "control";
-        break;
-      case ARM_SYSREG_MSPLIM:
-        ret = "msplim";
-        break;
-      case ARM_SYSREG_PSPLIM:
-        ret = "psplim";
-        break;
-      case ARM_SYSREG_MSP_NS:
-        ret = "msp_ns";
-        break;
-      case ARM_SYSREG_PSP_NS:
-        ret = "psp_ns";
-        break;
-      case ARM_SYSREG_MSPLIM_NS:
-        ret = "msplim_ns";
-        break;
-      case ARM_SYSREG_PSPLIM_NS:
-        ret = "psplim_ns";
-        break;
-      case ARM_SYSREG_PRIMASK_NS:
-        ret = "primask_ns";
-        break;
-      case ARM_SYSREG_BASEPRI_NS:
-        ret = "basepri_ns";
-        break;
-      case ARM_SYSREG_FAULTMASK_NS:
-        ret = "faultmask_ns";
-        break;
-      case ARM_SYSREG_CONTROL_NS:
-        ret = "control_ns";
-        break;
-      case ARM_SYSREG_SP_NS:
-        ret = "sp_ns";
-        break;
-      default: {
-        std::stringstream ss;
-        ss << "<TODO:" << sysreg << ">";
-        ret = ss.str();
-        break;
+  // Capstone 6 reports MSR/MRS special registers as a system operand
+  // without the Capstone 5 ARM_SYSREG_* masks; print the operand text.
+  auto armSysReg2String = [&inst](uint64_t Index) {
+    std::string Text;
+    uint64_t Current = 0;
+    int Depth = 0;
+    for (const char* P = inst.op_str; *P != '\0'; ++P) {
+      if (*P == '[' || *P == '{') {
+        ++Depth;
+      } else if (*P == ']' || *P == '}') {
+        --Depth;
+      } else if (*P == ',' && Depth == 0) {
+        ++Current;
+        continue;
       }
+      if (Current == Index && !(Text.empty() && std::isspace(*P))) {
+        Text += *P;
       }
-      return ret;
     }
+    while (!Text.empty() && std::isspace(Text.back())) {
+      Text.pop_back();
+    }
+    return Text;
   };
 
   const cs_arm_op& op = inst.detail->arm.operands[index];
   if (op.type == ARM_OP_SYSREG) {
-    os << armSysReg2String(op.reg);
+    os << armSysReg2String(index);
   } else {
     os << getRegisterName(op.reg);
     std::string shift_type = armShifter2String(op.shift.type);
@@ -768,11 +648,14 @@ void ArmPrettyPrinter::printOpIndirect(
     case ARM_SFT_ROR:
       os << "ROR";
       break;
-    case ARM_SFT_RRX_REG:
     case ARM_SFT_RRX:
       os << "RRX";
       break;
+    case ARM_SFT_UXTW:
+      os << "UXTW";
+      break;
     case ARM_SFT_INVALID:
+    case ARM_SFT_REG:
       std::cerr << "Invalid ARM shift operation.\n";
       exit(1);
     }
@@ -787,7 +670,7 @@ void ArmPrettyPrinter::printOpIndirect(
       os << ", #" << op.mem.disp;
   }
   os << ']';
-  if (detail.writeback) {
+  if (inst.detail->writeback) {
     // If this operand has 'writeback', and it's the last operand,
     // it can be assumed to be pre-indexed.
     // NOTE: Is there a way of finding the info about pre/post-index in

@@ -16,6 +16,7 @@
 #ifndef GTIRB_PP_A64ASM_PRINTER_H
 #define GTIRB_PP_A64ASM_PRINTER_H
 
+#include "CapstoneCompat.hpp"
 #include "ElfPrettyPrinter.hpp"
 
 namespace gtirb_pprint {
@@ -40,6 +41,7 @@ public:
 
 protected:
   std::string getRegisterName(unsigned int reg) const override;
+  std::string getRegisterName(const cs_aarch64_op& op) const;
   void fixupInstruction(const gtirb::CodeBlock& block, cs_insn& inst) override;
 
   void printInstruction(std::ostream& os, const gtirb::CodeBlock& block,
@@ -61,18 +63,18 @@ protected:
                        const cs_insn& inst, uint64_t index) override;
 
   void printOpRawValue(std::ostream& os, const cs_insn& inst, uint64_t index);
-  void printOpPrefetch(std::ostream& os, const arm64_prefetch_op prefetch);
-  void printOpBarrier(std::ostream& os, const arm64_barrier_op barrier);
+  void printOpPrefetch(std::ostream& os, unsigned int prefetch);
+  void printOpBarrier(std::ostream& os, unsigned int barrier);
 
   void printSymExprPrefix(std::ostream& OS, const gtirb::SymAttributeSet& Attrs,
                           bool IsNotBranch) override;
   void printSymExprSuffix(std::ostream& OS, const gtirb::SymAttributeSet& Attrs,
                           bool IsNotBranch) override;
 
-  void printShift(std::ostream& os, const arm64_shifter type,
+  void printShift(std::ostream& os, const aarch64_shifter type,
                   unsigned int value);
-  void printExtender(std::ostream& os, const arm64_extender& ext,
-                     const arm64_shifter shiftType, uint64_t shiftValue);
+  void printExtender(std::ostream& os, const aarch64_extender& ext,
+                     const aarch64_shifter shiftType, uint64_t shiftValue);
   void printSymbolHeader(std::ostream& os, const gtirb::Symbol& sym) override;
 
 private:

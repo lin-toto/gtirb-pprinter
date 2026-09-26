@@ -19,6 +19,7 @@
 #include "driver/Logger.h"
 
 #include <capstone/capstone.h>
+#include <cstring>
 
 namespace gtirb_pprint {
 
@@ -106,7 +107,25 @@ void Mips32PrettyPrinter::printHeader(std::ostream& os) {
 // Note: cfc1 and ctc1 occur as part of trunc.w.d macro expansion (when
 // compiling with -march=mips1); rdhwr is produced by gcc/libsanitizer (kernel
 // illegal instruction trap optimized for v1).
-static bool printOpRegdirectSpecial(std::ostream& os,
+// General-purpose register number from its name (Capstone 6 numbers the
+// MIPS register enum by name, so there is no MIPS_REG_0 base to subtract).
+static int gprNumber(const char* Name) {
+  static const char* Names[] = {
+      "zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2",
+      "t3",   "t4", "t5", "t6", "t7", "s0", "s1", "s2", "s3", "s4", "s5",
+      "s6",   "s7", "t8", "t9", "k0", "k1", "gp", "sp", "fp", "ra"};
+  for (int I = 0; Name && I < 32; ++I) {
+    if (std::strcmp(Name, Names[I]) == 0) {
+      return I;
+    }
+  }
+  if (Name && std::strcmp(Name, "s8") == 0) {
+    return 30;
+  }
+  return -1;
+}
+
+static bool printOpRegdirectSpecial(std::ostream& os, csh Handle,
                                     unsigned int opcode, // cs_insn.id
                                     uint64_t opno, mips_reg reg) {
   // NOTE: this should ideally be an unordered_set, but it's not worth mucking
@@ -118,7 +137,10 @@ static bool printOpRegdirectSpecial(std::ostream& os,
   };
   if (specials.find({opcode, opno}) == specials.end())
     return false;
-  os << "$" << (reg - MIPS_REG_0);
+  int Number = gprNumber(cs_reg_name(Handle, reg));
+  if (Number < 0)
+    return false;
+  os << "$" << Number;
   return true;
 }
 
@@ -126,7 +148,7 @@ void Mips32PrettyPrinter::printOpRegdirect(std::ostream& os,
                                            const cs_insn& inst,
                                            uint64_t index) {
   const cs_mips_op& op = inst.detail->mips.operands[index];
-  if (!printOpRegdirectSpecial(os, inst.id, index, op.reg))
+  if (!printOpRegdirectSpecial(os, this->csHandle, inst.id, index, op.reg))
     os << getRegisterName(op.reg);
 }
 

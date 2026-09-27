@@ -1114,6 +1114,12 @@ std::optional<std::string> RiscvPrettyPrinter::getDirectRelocationTargetName(
   }
 
   gtirb::SymAddrConst Expression = *SymAddr;
+  if (inst.id == RISCV_INS_AUIPC) {
+    // This helper is used after a call/tail pair has been recognized. The
+    // pseudo-instruction takes the full target, not the split high fragment.
+    Expression.Attributes.erase(gtirb::SymAttribute::HI);
+    Expression.Attributes.erase(gtirb::SymAttribute::PCREL);
+  }
   if (Expression.Sym->getReferent<gtirb::ProxyBlock>()) {
     Expression.Attributes.insert(gtirb::SymAttribute::PLT);
   }
@@ -1218,19 +1224,56 @@ bool RiscvPrettyPrinter::printPltCallRelocation(
   }
 
   const cs_riscv& Detail = inst.detail->riscv;
-  if (Detail.op_count < 2 || Detail.operands[0].type != RISCV_OP_REG ||
-      Detail.operands[0].reg != RISCV_REG_X1) {
+  if (Detail.op_count < 2 || Detail.operands[0].type != RISCV_OP_REG) {
     return false;
   }
 
+  const bool Tail = Detail.operands[0].reg == RISCV_REG_X6;
+  if (!Tail && Detail.operands[0].reg != RISCV_REG_X1) {
+    return false;
+  }
+
+  if (Tail) {
+    // A tail pseudo uses t1. Fold only the exact AUIPC t1 / JALR zero,t1
+    // pair, within one block; never change a data-address materialization or
+    // clobber a different temporary to force an arbitrary jump into a tail.
+    const auto Offset = static_cast<uint64_t>(Address - *block.getAddress());
+    if (Offset + 8 > block.getSize()) {
+      return false;
+    }
+    const auto* Bytes = block.rawBytes<uint8_t>() + Offset + 4;
+    uint32_t Low = 0;
+    for (unsigned I = 0; I < 4; ++I) {
+      unsigned Index = module.getByteOrder() == gtirb::ByteOrder::Big ? 3 - I : I;
+      Low |= static_cast<uint32_t>(Bytes[Index]) << (I * 8);
+    }
+    if ((Low & 0xfffff) != 0x30067) {
+      return false;
+    }
+  }
+
   auto Target = getPltRelocationTargetName(block, inst);
+  if (!Target && Tail) {
+    // Fully linked binaries describe split PCREL HI/LO references to the
+    // original PLT entry instead of carrying a CALL_PLT relocation.
+    const auto* Interval = block.getByteInterval();
+    const auto* Low = std::get_if<gtirb::SymAddrConst>(
+        Interval->getSymbolicExpression(Address + 4 - *Interval->getAddress()));
+    if (!Low || !Low->Sym || Low->Offset ||
+        !Low->Attributes.count(gtirb::SymAttribute::PCREL) ||
+        !Low->Attributes.count(gtirb::SymAttribute::LO) ||
+        Low->Sym->getAddress() != Address) {
+      return false;
+    }
+    Target = getPltTargetName(block, inst);
+  }
   if (!Target) {
     return false;
   }
 
   std::stringstream Line;
   printEA(Line, Address);
-  Line << "  call " << *Target;
+  Line << (Tail ? "  tail " : "  call ") << *Target;
   printCommentableLine(Line, os, Address);
   os << '\n';
 

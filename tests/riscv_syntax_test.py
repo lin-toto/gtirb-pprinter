@@ -143,6 +143,7 @@ class RiscvInstructionsTest(PPrinterTest):
             ("6f000000", "tail", "proxy"),
             ("ef000000", "call", "plt"),
             ("97000000 e7800000", "call", "plt_attribute"),
+            ("17030000 67000300", "tail", "plt_attribute"),
         )
         for isa in ("RISCV32", "RISCV64"):
             for encoded, opcode, kind in cases:
@@ -225,6 +226,60 @@ class RiscvInstructionsTest(PPrinterTest):
                                 self.assertEqual(
                                     result.returncode, 0, result.stderr
                                 )
+
+    def test_split_plt_tail_after_nops_links_shared(self):
+        """AUIPC t1/JALR zero pairs need CALL_PLT, not a direct DSO relocation."""
+        for valid_partner in (True, False):
+            with self.subTest(valid_partner=valid_partner):
+                ir, module = create_test_module(
+                    file_format=gtirb.Module.FileFormat.ELF,
+                    isa=gtirb.Module.ISA.ValidButUnsupported,
+                )
+                module.aux_data["archInfo"] = gtirb.AuxData(
+                    {"ISA": "RISCV64"}, "mapping<string,string>"
+                )
+                _, interval = add_text_section(module, address=0x1000)
+                add_code_block(interval, bytes.fromhex("13000000") * 3)
+                pair = add_code_block(interval, bytes.fromhex(
+                    "17030000 " + ("67000300" if valid_partner else "13030300")
+                ))
+                anchor = gtirb.Symbol("anchor", payload=pair, module=module)
+                _, plt = add_section(module, ".plt", address=0x2000)
+                entry = add_code_block(plt, bytes.fromhex("13000000") * 4)
+                target = gtirb.Symbol("plt_entry", payload=entry, module=module)
+                external = gtirb.Symbol(
+                    "external", payload=gtirb.ProxyBlock(module=module),
+                    module=module,
+                )
+                module.aux_data["symbolForwarding"].data[target] = external
+                attrs = gtirb.SymbolicExpression.Attribute
+                interval.symbolic_expressions[pair.offset] = gtirb.SymAddrConst(
+                    0, target, {attrs.PCREL, attrs.HI}
+                )
+                interval.symbolic_expressions[pair.offset + 4] = gtirb.SymAddrConst(
+                    0, anchor, {attrs.PCREL, attrs.LO}
+                )
+                asm = run_asm_pprinter(ir, ["--shared=yes"])
+                if not valid_partner:
+                    self.assertNotIn("tail external", asm)
+                    continue
+                self.assertRegex(asm, r"(?m)^\s*tail external@plt\s*$")
+                assembler = shutil.which("riscv64-linux-gnu-as")
+                linker = shutil.which("riscv64-linux-gnu-ld")
+                if assembler and linker:
+                    with tempfile.TemporaryDirectory() as directory:
+                        obj = str(Path(directory) / "probe.o")
+                        result = subprocess.run(
+                            [assembler, "-march=rv64gc", "-mabi=lp64d", "-o", obj],
+                            input=asm, text=True, capture_output=True, timeout=30,
+                        )
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        result = subprocess.run(
+                            [linker, "-melf64lriscv", "--shared", "--no-relax",
+                             "-o", str(Path(directory) / "probe.so"), obj],
+                            text=True, capture_output=True, timeout=30,
+                        )
+                        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_floating_rounding_modes_are_preserved(self):
         """Floating conversion instructions retain their encoded FRM."""

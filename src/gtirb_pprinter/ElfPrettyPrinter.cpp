@@ -250,6 +250,18 @@ void ElfPrettyPrinter::printInstruction(std::ostream& os,
     return;
   }
 
+  // The x87 environment/state mnemonics do not encode their memory width.
+  // An operand-size override selects 14/94 bytes instead of 28/108 bytes;
+  // Capstone prints the same mnemonic for both. Preserve just the prefix so
+  // a symbolic memory operand can still be relocated normally.
+  if ((module.getISA() == gtirb::ISA::X64 ||
+       module.getISA() == gtirb::ISA::IA32) &&
+      inst.detail->x86.prefix[2] == X86_PREFIX_OPSIZE &&
+      (inst.id == X86_INS_FLDENV || inst.id == X86_INS_FNSTENV ||
+       inst.id == X86_INS_FRSTOR || inst.id == X86_INS_FNSAVE)) {
+    os << syntax.tab() << "  .byte 0x66\n";
+  }
+
   // Print explicit directives for instruction prefixes needed for @TLSGD
   // relocations, which require a fixed 16-byte instruction sequence.
   if (inst.id == X86_INS_LEA &&

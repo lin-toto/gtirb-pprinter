@@ -116,8 +116,15 @@ void IntelPrettyPrinter::printOpIndirect(
          "printOpIndirect called without a memory operand");
   bool first = true;
 
-  if (std::optional<std::string> size = syntax.getSizeName(op.size * 8))
-    os << *size << " PTR ";
+  // Capstone reports a scalar operand size for x87 state images. It is not
+  // a valid Intel-syntax size qualifier (e.g. DWORD PTR fnsave is rejected).
+  // The opcode and the explicit 66 prefix emitted by ElfPrettyPrinter define
+  // the image width; the address itself remains an ordinary memory operand.
+  if (inst.id != X86_INS_FLDENV && inst.id != X86_INS_FNSTENV &&
+      inst.id != X86_INS_FRSTOR && inst.id != X86_INS_FNSAVE) {
+    if (std::optional<std::string> size = syntax.getSizeName(op.size * 8))
+      os << *size << " PTR ";
+  }
 
   if (op.mem.segment != X86_REG_INVALID) {
     os << getRegisterName(op.mem.segment) << ':';

@@ -78,7 +78,7 @@ class Arm64InstructionsTest(PPrinterTest):
             (b"\xC7\x04\x02\x4E", "dup v7.8h,v6.h[0]"),
             (b"\x00\x00\x01\x4E", "tbl v0.16b,{v0.16b},v1.16b"),
             (b"\x47\x90\x00\x0D", "st1 {v7.s}[1],[x2]"),
-            (b"\x9D\x0E\x9E\x0D", "st1 {v29.b}[3],[x20],lr"),
+            (b"\x9D\x0E\x9E\x0D", "st1 {v29.b}[3],[x20],x30"),
             (b"\x40\x1E\xB2\x4E", "mov v0.16b,v18.16b"),
             (b"\x00\xBC\x21\x1E", "fcsel s0,s0,s1,lt"),
             (b"\x40\x00\x80\xF9", "prfm pldl1keep,[x2]"),

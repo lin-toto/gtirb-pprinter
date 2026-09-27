@@ -136,7 +136,7 @@ class RiscvInstructionsTest(PPrinterTest):
         """Call expansion and PLT forwarding retain the expression addend."""
         cases = (
             ("ef000000", "call", "local"),
-            ("6f000000", "j", "local"),
+            ("6f000000", "jal", "local"),
             ("01a0", "c.j", "local"),
             ("6300b500", "beq", "local"),
             ("ef000000", "call", "proxy"),
@@ -204,7 +204,7 @@ class RiscvInstructionsTest(PPrinterTest):
                         name = "target" if kind == "local" else "external"
                         offset = f"{addend:+d}" if addend else ""
                         suffix = "" if kind == "local" else "@plt"
-                        registers = "a0,a1," if opcode == "beq" else ""
+                        registers = {"beq": "a0,a1,", "jal": "zero,"}.get(opcode, "")
                         self.assertRegex(
                             asm, rf"(?m)^\s*{re.escape(opcode)}\s+"
                             + re.escape(registers)
@@ -309,10 +309,8 @@ class RiscvInstructionsTest(PPrinterTest):
 
         asm = run_asm_pprinter(ir)
 
-        for mode in ("rne", "rtz", "rdn", "rup", "rmm"):
+        for mode in ("rne", "rtz", "rdn", "rup", "rmm", "dyn"):
             self.assertIn(f"fcvt.lu.d a5,fa5,{mode}", asm)
-        # DYN is the assembler default, and Capstone intentionally omits it.
-        self.assertRegex(asm, r"(?m)^\s*fcvt\.lu\.d a5,fa5\s*$")
 
     def test_unsymbolized_direct_branch_uses_defined_local_label(self):
         """A resolved branch to an instruction remains safe under relayout."""
@@ -335,7 +333,7 @@ class RiscvInstructionsTest(PPrinterTest):
 
         asm = run_asm_pprinter(ir)
 
-        self.assertIn("j .Lgtirb_riscv_1008", asm)
+        self.assertIn("jal zero,.Lgtirb_riscv_1008", asm)
         self.assertIn(".Lgtirb_riscv_1008:", asm)
 
     def test_unsymbolized_branch_to_interior_byte_has_no_undefined_label(self):
@@ -356,7 +354,7 @@ class RiscvInstructionsTest(PPrinterTest):
         asm = run_asm_pprinter(ir)
 
         self.assertNotIn(".Lgtirb_riscv_1006", asm)
-        self.assertRegex(asm, r"j\s+\.\+6")
+        self.assertRegex(asm, r"jal\s+zero,\.\+6")
 
     def test_symbolic_zero_low_jalr_uses_expanded_spelling(self):
         """A zero PCREL_LO immediate must survive Capstone's jalr alias."""
@@ -861,8 +859,10 @@ class RiscvInstructionsTest(PPrinterTest):
                 anchor_index = asm.index(anchor_text)
                 hi_index = asm.index(hi_text)
                 self.assertLess(anchor_index, hi_index)
-                self.assertNotIn("nop", asm[anchor_index:hi_index])
-                self.assertGreater(asm.rfind("nop", 0, anchor_index), -1)
+                self.assertNotIn("addi zero,zero,0", asm[anchor_index:hi_index])
+                self.assertGreater(
+                    asm.rfind("addi zero,zero,0", 0, anchor_index), -1
+                )
 
     def test_pcrel_low_base_must_match_high_destination(self):
         # Include a store whose value is the producer's register: the base,

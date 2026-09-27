@@ -318,9 +318,8 @@ static const char* getUncompressedMemoryOpcode(unsigned int Id) {
 
 static bool hasCompressedMemoryOperand(const cs_insn& Inst) {
   const cs_riscv& Detail = Inst.detail->riscv;
-  return isCompressedLoadStore(Inst.id) && Detail.op_count == 3 &&
-         Detail.operands[1].type == RISCV_OP_IMM &&
-         Detail.operands[2].type == RISCV_OP_REG;
+  return isCompressedLoadStore(Inst.id) && Detail.op_count == 2 &&
+         Detail.operands[1].type == RISCV_OP_MEM;
 }
 
 static bool isPcRelativeImmediate(unsigned int Id) {
@@ -363,45 +362,6 @@ static bool isPltSectionName(const std::string& Name) {
 }
 
 static const char* getInvertedBranchOpcode(const cs_insn& Inst) {
-  std::string Mnemonic = ascii_str_tolower(Inst.mnemonic);
-  if (Mnemonic.rfind("c.", 0) == 0) {
-    Mnemonic = Mnemonic.substr(2);
-  }
-
-  const cs_riscv& Detail = Inst.detail->riscv;
-  if (Detail.op_count == 2) {
-    if (Mnemonic == "beqz") {
-      return "bnez";
-    }
-    if (Mnemonic == "bnez") {
-      return "beqz";
-    }
-    if (Mnemonic == "bltz") {
-      return "bgez";
-    }
-    if (Mnemonic == "bgez") {
-      return "bltz";
-    }
-    if (Mnemonic == "blez") {
-      return "bgtz";
-    }
-    if (Mnemonic == "bgtz") {
-      return "blez";
-    }
-    if (Inst.id == RISCV_INS_BEQ) {
-      return "bnez";
-    }
-    if (Inst.id == RISCV_INS_BNE) {
-      return "beqz";
-    }
-    if (Inst.id == RISCV_INS_BLT) {
-      return "bgez";
-    }
-    if (Inst.id == RISCV_INS_BGE) {
-      return "bltz";
-    }
-  }
-
   switch (Inst.id) {
   case RISCV_INS_BEQ:
     return "bne";
@@ -441,9 +401,7 @@ RiscvPrettyPrinter::RiscvPrettyPrinter(gtirb::Context& context_,
                                        const ElfSyntax& syntax_,
                                        const PrintingPolicy& policy_)
     : ElfPrettyPrinter(context_, module_, syntax_, policy_) {
-  // RV32GC/RV64GC with real (non-alias) syntax and details; every decoded
-  // instruction then goes through capstone_compat::adaptRiscv, which restores
-  // the Capstone 5.0.1 spellings and operand shapes this printer relies on.
+  // RV32GC/RV64GC with native real (non-alias) syntax and operands.
   [[maybe_unused]] cs_err err = capstone_compat::openRiscv(
       getModuleISA(module_) == "riscv64",
       module_.getByteOrder() == gtirb::ByteOrder::Big, &this->csHandle);
@@ -455,37 +413,15 @@ RiscvPrettyPrinter::RiscvPrettyPrinter(gtirb::Context& context_,
   collectInteriorCodeSymbols();
 }
 
-bool RiscvPrettyPrinter::adaptInstruction(cs_insn& inst) {
-  return capstone_compat::adaptRiscv(this->csHandle, inst);
-}
-
 std::string RiscvPrettyPrinter::getRegisterName(unsigned int reg) const {
   return reg == RISCV_REG_INVALID ? "" : cs_reg_name(this->csHandle, reg);
 }
 
-bool RiscvPrettyPrinter::hasSymbolicAddiAlias(
+bool RiscvPrettyPrinter::hasSymbolicCompressedJalr(
     const gtirb::CodeBlock& block, const cs_insn& inst) {
   const cs_riscv& Detail = inst.detail->riscv;
-  std::string Mnemonic = ascii_str_tolower(inst.mnemonic);
 
-  if ((inst.id != RISCV_INS_ADDI && Mnemonic != "mv") ||
-      Detail.op_count != 2 || Detail.operands[0].type != RISCV_OP_REG ||
-      Detail.operands[1].type != RISCV_OP_REG) {
-    return false;
-  }
-
-  const gtirb::SymbolicExpression* Symex =
-      getInstructionSymbolicExpression(block, inst);
-  return Symex != nullptr && std::get_if<gtirb::SymAddrConst>(Symex) != nullptr;
-}
-
-bool RiscvPrettyPrinter::hasSymbolicJalrAlias(
-    const gtirb::CodeBlock& block, const cs_insn& inst) {
-  const cs_riscv& Detail = inst.detail->riscv;
-  std::string Mnemonic = ascii_str_tolower(inst.mnemonic);
-
-  if ((inst.id != RISCV_INS_JALR && inst.id != RISCV_INS_C_JALR &&
-       inst.id != RISCV_INS_C_JR && Mnemonic != "jalr" && Mnemonic != "jr") ||
+  if ((inst.id != RISCV_INS_C_JALR && inst.id != RISCV_INS_C_JR) ||
       Detail.op_count != 1 || Detail.operands[0].type != RISCV_OP_REG) {
     return false;
   }
@@ -563,12 +499,9 @@ void RiscvPrettyPrinter::validatePcrelAnchors() const {
   cs_option(this->csHandle, CS_OPT_DETAIL, CS_OPT_ON);
   auto Decode = [&](const gtirb::ByteInterval& Interval, uint64_t Offset) {
     cs_insn* Insn = nullptr;
-    if (Offset < Interval.getInitializedSize() &&
-        cs_disasm(this->csHandle, Interval.rawBytes<uint8_t>() + Offset,
-                  Interval.getInitializedSize() - Offset, 0, 1, &Insn) == 1 &&
-        !capstone_compat::adaptRiscv(this->csHandle, *Insn)) {
-      cs_free(Insn, 1);
-      Insn = nullptr;
+    if (Offset < Interval.getInitializedSize()) {
+      cs_disasm(this->csHandle, Interval.rawBytes<uint8_t>() + Offset,
+                Interval.getInitializedSize() - Offset, 0, 1, &Insn);
     }
     return std::unique_ptr<cs_insn, std::function<void(cs_insn*)>>(
         Insn, [](cs_insn* I) { cs_free(I, 1); });
@@ -612,9 +545,7 @@ void RiscvPrettyPrinter::validatePcrelAnchors() const {
           Source = Detail.operands[I].mem.base;
         }
       }
-      if (hasCompressedMemoryOperand(*LowInsn)) {
-        Source = Detail.operands[2].reg;
-      } else if ((LowInsn->id == RISCV_INS_C_ADDI ||
+      if ((LowInsn->id == RISCV_INS_C_ADDI ||
                   LowInsn->id == RISCV_INS_C_ADDIW) &&
                  Detail.op_count == 2 && Detail.operands[0].type == RISCV_OP_REG) {
         Source = Detail.operands[0].reg;
@@ -623,7 +554,7 @@ void RiscvPrettyPrinter::validatePcrelAnchors() const {
                  LowInsn->id == RISCV_INS_JALR ||
                  LowInsn->id == RISCV_INS_C_JALR ||
                  LowInsn->id == RISCV_INS_C_JR) {
-        // Capstone aliases mv/jalr/jr omit a zero immediate and sometimes rd.
+        // RVC jumps have one explicit source; normal forms also name rd.
         unsigned int Index = Detail.op_count == 1 ? 0 : 1;
         if (Detail.op_count > Index && Detail.operands[Index].type == RISCV_OP_REG) {
           Source = Detail.operands[Index].reg;
@@ -664,10 +595,6 @@ void RiscvPrettyPrinter::collectLocalBranchLabels() {
         Insn, [Count](cs_insn* I) { cs_free(I, Count); });
 
     for (size_t I = 0; I < Count; I++) {
-      // Stop where Capstone 5.0.1's cs_disasm would have stopped.
-      if (!capstone_compat::adaptRiscv(this->csHandle, Insn[I])) {
-        break;
-      }
       InstructionAddresses.insert(Insn[I].address);
       if (!isPcRelativeImmediate(Insn[I].id)) {
         continue;
@@ -680,11 +607,11 @@ void RiscvPrettyPrinter::collectLocalBranchLabels() {
           continue;
         }
 
-        gtirb::Addr Ea(Insn[I].address);
-        gtirb::Addr Target =
-            Op.imm >= 0 ? Ea + static_cast<uint64_t>(Op.imm)
-                        : Ea - static_cast<uint64_t>(-Op.imm);
-        BranchTargets.insert(static_cast<uint64_t>(Target));
+        uint64_t Target = static_cast<uint64_t>(Op.imm);
+        if (getModuleISA(module) == "riscv32") {
+          Target = static_cast<uint32_t>(Target);
+        }
+        BranchTargets.insert(Target);
       }
     }
   }
@@ -776,10 +703,30 @@ void RiscvPrettyPrinter::printInstruction(std::ostream& os,
   std::stringstream InstructLine;
   printEA(InstructLine, ea);
 
+  // Native Capstone correctly spells an empty predecessor/successor set as
+  // zero, but GNU as does not accept `fence 0,...` or `fence ...,0`. Preserve
+  // these valid no-op fences without changing their architectural fields.
+  if (inst.id == RISCV_INS_FENCE && inst.size == 4) {
+    const auto& Detail = inst.detail->riscv;
+    const bool EmptyMask = std::any_of(
+        Detail.operands, Detail.operands + Detail.op_count,
+        [](const cs_riscv_op& Op) { return Op.type == RISCV_OP_IMM && Op.imm == 0; });
+    if (EmptyMask) {
+      uint32_t Word = 0;
+      for (unsigned int I = 0; I < inst.size; ++I) {
+        const unsigned int Shift = module.getByteOrder() == gtirb::ByteOrder::Big
+                                       ? 8 * (inst.size - 1 - I) : 8 * I;
+        Word |= static_cast<uint32_t>(inst.bytes[I]) << Shift;
+      }
+      InstructLine << "  .4byte 0x" << std::hex << Word;
+      printCommentableLine(InstructLine, os, ea);
+      os << '\n';
+      return;
+    }
+  }
+
   std::string opcode = ascii_str_tolower(inst.mnemonic);
-  if (hasSymbolicAddiAlias(block, inst)) {
-    opcode = "addi";
-  } else if (hasSymbolicJalrAlias(block, inst)) {
+  if (hasSymbolicCompressedJalr(block, inst)) {
     opcode = "jalr";
   } else if (hasSymbolicCompressedAddi(block, inst)) {
     opcode = "addi";
@@ -960,7 +907,7 @@ bool RiscvPrettyPrinter::printGpRelativeCopyRelocation(
 
   if (isCompressedIntegerLoad(inst.id) && hasCompressedMemoryOperand(inst) &&
       Detail.operands[0].type == RISCV_OP_REG &&
-      isGpRegister(Detail.operands[2].reg) &&
+      isGpRegister(Detail.operands[1].mem.base) &&
       Detail.operands[0].reg != RISCV_REG_X0) {
     unsigned int Reg = Detail.operands[0].reg;
     PrintLui(os, Reg);
@@ -1044,33 +991,21 @@ bool RiscvPrettyPrinter::printLongConditionalBranch(
 }
 
 bool RiscvPrettyPrinter::isPltCall(const cs_insn& inst) const {
-  std::string Mnemonic = ascii_str_tolower(inst.mnemonic);
   const cs_riscv& Detail = inst.detail->riscv;
-
-  if (inst.id == RISCV_INS_C_JAL || Mnemonic == "c.jal") {
+  if (inst.id == RISCV_INS_C_JAL) {
     return true;
   }
-
-  if (inst.id != RISCV_INS_JAL && Mnemonic != "jal") {
-    return false;
-  }
-
-  if (Detail.op_count == 1) {
-    return Mnemonic == "jal";
-  }
-  return Detail.op_count >= 2 && Detail.operands[0].type == RISCV_OP_REG &&
+  return inst.id == RISCV_INS_JAL && Detail.op_count == 2 &&
+         Detail.operands[0].type == RISCV_OP_REG &&
          Detail.operands[0].reg == RISCV_REG_X1;
 }
 
 bool RiscvPrettyPrinter::isPltTailCall(const cs_insn& inst) const {
-  std::string Mnemonic = ascii_str_tolower(inst.mnemonic);
   const cs_riscv& Detail = inst.detail->riscv;
-
-  if (Mnemonic == "j" || Mnemonic == "c.j") {
+  if (inst.id == RISCV_INS_C_J) {
     return true;
   }
-
-  return inst.id == RISCV_INS_JAL && Detail.op_count >= 2 &&
+  return inst.id == RISCV_INS_JAL && Detail.op_count == 2 &&
          Detail.operands[0].type == RISCV_OP_REG &&
          Detail.operands[0].reg == RISCV_REG_X0;
 }
@@ -1286,34 +1221,24 @@ void RiscvPrettyPrinter::printOperandList(std::ostream& os,
                                           const cs_insn& inst) {
   const cs_riscv& detail = inst.detail->riscv;
 
-  if (isCsrInstruction(inst)) {
+  // CSR names, fence masks and FP immediates have architectural spellings in
+  // the native disassembly text, and cannot carry address relocations.
+  bool HasFpImmediate = false;
+  for (unsigned int I = 0; I < detail.op_count; ++I) {
+    HasFpImmediate |= detail.operands[I].type == RISCV_OP_FP;
+  }
+  if (isCsrInstruction(inst) || inst.id == RISCV_INS_FENCE || HasFpImmediate) {
     os << inst.op_str;
     return;
   }
 
-  if (hasSymbolicJalrAlias(block, inst)) {
-    // Capstone contracts `jalr ra,reg,0` to `jalr reg` and
-    // `jalr zero,reg,0` to `jr reg`.  A symbolic low immediate cannot be
-    // printed in either alias or its compressed equivalent, so restore the
-    // expanded spelling while preserving calls versus tail jumps.
-    const std::string Mnemonic = ascii_str_tolower(inst.mnemonic);
+  if (hasSymbolicCompressedJalr(block, inst)) {
+    // A relocated low immediate needs an uncompressed JALR, while the RVC
+    // instruction determines whether this is a call or a tail jump.
     const unsigned int Destination =
-        (Mnemonic == "jr" || Mnemonic == "c.jr") ? RISCV_REG_X0 : RISCV_REG_X1;
+        inst.id == RISCV_INS_C_JR ? RISCV_REG_X0 : RISCV_REG_X1;
     os << getRegisterName(Destination) << ',';
     printOperand(os, block, inst, 0);
-    os << ',';
-
-    const gtirb::SymbolicExpression* Symex =
-        getInstructionSymbolicExpression(block, inst);
-    const gtirb::SymAddrConst* Symaddr = this->getSymbolicImmediate(Symex);
-    this->printSymbolicExpression(os, Symaddr, true);
-    return;
-  }
-
-  if (hasSymbolicAddiAlias(block, inst)) {
-    printOperand(os, block, inst, 0);
-    os << ',';
-    printOperand(os, block, inst, 1);
     os << ',';
 
     const gtirb::SymbolicExpression* Symex =
@@ -1349,54 +1274,31 @@ void RiscvPrettyPrinter::printOperandList(std::ostream& os,
     return;
   }
 
-  if (hasCompressedMemoryOperand(inst)) {
-    printOperand(os, block, inst, 0);
-    os << ',';
-    const gtirb::SymbolicExpression* Symex =
-        getInstructionSymbolicExpression(block, inst);
-    printOpImmediate(os, Symex, inst, 1);
-    os << '(';
-    printOpRegdirect(os, inst, 2);
-    os << ')';
-    return;
-  }
-
   if (isLoadReserved(inst.id) && detail.op_count == 2 &&
       detail.operands[0].type == RISCV_OP_REG &&
-      detail.operands[1].type == RISCV_OP_REG) {
+      detail.operands[1].type == RISCV_OP_MEM) {
     printOperand(os, block, inst, 0);
     os << ",(";
-    printOperand(os, block, inst, 1);
+    os << getRegisterName(detail.operands[1].mem.base);
     os << ')';
     return;
   }
 
   if (isStoreConditionalOrAtomic(inst.id) && detail.op_count == 3 &&
       detail.operands[0].type == RISCV_OP_REG &&
-      detail.operands[1].type == RISCV_OP_REG &&
+      detail.operands[1].type == RISCV_OP_MEM &&
       detail.operands[2].type == RISCV_OP_REG) {
     printOperand(os, block, inst, 0);
     os << ',';
-    printOperand(os, block, inst, 1);
-    os << ",(";
     printOperand(os, block, inst, 2);
+    os << ",(";
+    os << getRegisterName(detail.operands[1].mem.base);
     os << ')';
     return;
   }
 
   const auto RoundingMode = getTrailingRoundingMode(inst);
-  int OperandCount = detail.op_count;
-  if (RoundingMode) {
-    const std::string_view RawOperands(inst.op_str);
-    const size_t RawOperandCount =
-        1 + std::count(RawOperands.begin(), RawOperands.end(), ',');
-    // Current Capstone omits the mode from detail.  If a future version adds
-    // it as an immediate, omit that numeric rendering and still print the
-    // assembler token below.
-    if (RawOperandCount == static_cast<size_t>(OperandCount)) {
-      --OperandCount;
-    }
-  }
+  const int OperandCount = detail.op_count;
 
   for (int i = 0; i < OperandCount; i++) {
     if (i != 0) {
@@ -1478,20 +1380,24 @@ void RiscvPrettyPrinter::printOpImmediate(
         cs_insn_group(this->csHandle, &inst, RISCV_GRP_CALL);
     this->printSymbolicExpression(os, SAA, !IsBranch);
   } else if (isPcRelativeImmediate(inst.id)) {
-    gtirb::Addr Ea(inst.address);
-    gtirb::Addr Target =
-        op.imm >= 0 ? Ea + static_cast<uint64_t>(op.imm)
-                    : Ea - static_cast<uint64_t>(-op.imm);
+    uint64_t Address = static_cast<uint64_t>(op.imm);
+    if (getModuleISA(module) == "riscv32") {
+      Address = static_cast<uint32_t>(Address);
+    }
+    const gtirb::Addr Target(Address);
     if (auto Name = getTargetLabel(Target)) {
       os << *Name;
     } else if (LocalBranchLabels.count(static_cast<uint64_t>(Target))) {
       os << getLocalBranchLabel(Target);
     } else {
       os << ".";
-      if (op.imm >= 0) {
+      const int64_t Displacement = getModuleISA(module) == "riscv32"
+          ? static_cast<int32_t>(Address - inst.address)
+          : static_cast<int64_t>(Address - inst.address);
+      if (Displacement >= 0) {
         os << '+';
       }
-      os << op.imm;
+      os << Displacement;
     }
   } else {
     os << op.imm;

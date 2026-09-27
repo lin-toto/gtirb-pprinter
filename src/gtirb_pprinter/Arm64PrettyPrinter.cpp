@@ -30,6 +30,26 @@ namespace gtirb_pprint {
 
 namespace {
 
+// Native register names; vector operands need architectural vN syntax even
+// though Capstone identifies the storage bank as Q/D/S/H/B and sets is_vreg.
+std::string registerName(csh Handle, unsigned int Reg, bool IsVreg) {
+  if (Reg == AARCH64_REG_INVALID) {
+    return "";
+  }
+  if (IsVreg) {
+    const unsigned int Banks[] = {AARCH64_REG_B0, AARCH64_REG_H0,
+                                  AARCH64_REG_S0, AARCH64_REG_D0,
+                                  AARCH64_REG_Q0};
+    for (unsigned int Base : Banks) {
+      if (Reg >= Base && Reg <= Base + 31) {
+        return "v" + std::to_string(Reg - Base);
+      }
+    }
+  }
+  const char* Name = cs_reg_name(Handle, Reg);
+  return Name ? Name : "";
+}
+
 bool hasArchFeature(const gtirb::Module& Module, const std::string& Feature) {
   const auto* ArchInfo = Module.getAuxData<gtirb::schema::ArchInfo>();
   if (!ArchInfo) {
@@ -134,36 +154,6 @@ bool hasIncompleteVectorLane(const cs_insn& Inst) {
   return false;
 }
 
-bool hasOmittedPostIndex(const cs_insn& Inst) {
-  const auto& Detail = Inst.detail->aarch64;
-  return Inst.detail->writeback && Detail.op_count > 0 &&
-         Detail.operands[Detail.op_count - 1].type == AARCH64_OP_MEM &&
-         std::strstr(Inst.op_str, "],") != nullptr;
-}
-
-bool hasDuplicatedCompareZero(const cs_insn& Inst) {
-  // Capstone 5 can append the implicit zero twice for scalar integer SIMD
-  // compares. These forms have two register operands and one zero immediate;
-  // the duplicate detailed operand is not an architectural fourth operand.
-  switch (Inst.id) {
-  case AARCH64_INS_CMEQ:
-  case AARCH64_INS_CMGE:
-  case AARCH64_INS_CMGT:
-  case AARCH64_INS_CMLE:
-  case AARCH64_INS_CMLT:
-    break;
-  default:
-    return false;
-  }
-  const auto& Detail = Inst.detail->aarch64;
-  return Detail.op_count == 4 && Detail.operands[0].type == AARCH64_OP_REG &&
-         Detail.operands[1].type == AARCH64_OP_REG &&
-         Detail.operands[2].type == AARCH64_OP_IMM &&
-         Detail.operands[2].imm == 0 &&
-         Detail.operands[3].type == AARCH64_OP_IMM &&
-         Detail.operands[3].imm == 0;
-}
-
 bool hasMnemonicPrefix(const cs_insn& Inst, std::string_view Prefix) {
   const std::string_view Mnemonic(Inst.mnemonic);
   return Mnemonic.size() >= Prefix.size() &&
@@ -173,10 +163,8 @@ bool hasMnemonicPrefix(const cs_insn& Inst, std::string_view Prefix) {
 bool isOptionalArchitectureInstruction(csh Handle, const cs_insn& Inst) {
   // Capstone annotates optional AArch64 extensions with the LLVM feature the
   // instruction requires. Printing their exact encoding keeps reconstruction
-  // independent of the assembler's selected architecture level. These are the
-  // Capstone 6 features that correspond to the Capstone 5 groups used before
-  // (CRYPTO is covered by AES and SHA2; PAC by PAUTH). Baseline instructions
-  // now also carry HasNEON or HasFPARMv8, which are not optional here.
+  // independent of the assembler's selected architecture level. Baseline
+  // instructions also carry HasNEON or HasFPARMv8, which are not optional here.
   static const aarch64_insn_group OptionalGroups[] = {
       AARCH64_FEATURE_HASAES,        AARCH64_FEATURE_HASCRC,
       AARCH64_FEATURE_HASDOTPROD,    AARCH64_FEATURE_HASFULLFP16,
@@ -269,18 +257,13 @@ void Arm64PrettyPrinter::printHeader(std::ostream& os) {
 }
 
 std::string Arm64PrettyPrinter::getRegisterName(unsigned int reg) const {
-  // Capstone 5 spellings: fp/lr for x29/x30.
-  return capstone_compat::aarch64RegName(this->csHandle, reg, false);
+  return registerName(this->csHandle, reg, false);
 }
 
 std::string Arm64PrettyPrinter::getRegisterName(const cs_aarch64_op& op) const {
   // A vector operand is reported as its Q/D/S/H/B register with is_vreg set;
   // print it as v<n>.
-  return capstone_compat::aarch64RegName(this->csHandle, op.reg, op.is_vreg);
-}
-
-bool Arm64PrettyPrinter::adaptInstruction(cs_insn& inst) {
-  return capstone_compat::adaptAArch64(this->csHandle, inst);
+  return registerName(this->csHandle, op.reg, op.is_vreg);
 }
 
 void Arm64PrettyPrinter::fixupInstruction(const gtirb::CodeBlock& block,
@@ -335,15 +318,13 @@ void Arm64PrettyPrinter::printInstruction(std::ostream& os,
   }
 
   // Some optional-extension instructions are rejected under the baseline
-  // `.arch armv8-a` directive, and Capstone occasionally omits vector-lane or
-  // post-index operands or duplicates a scalar compare's zero operand in its
-  // detailed representation. When no relocation
+  // `.arch armv8-a` directive, and Capstone can omit vector-lane information
+  // from its detailed representation. When no relocation
   // is attached, preserve those instructions exactly with `.inst` instead of
   // emitting a mnemonic that is unsupported or semantically incomplete.
   if (!hasSymbolicExpression(block, inst) && inst.size == 4 &&
       (isOptionalArchitectureInstruction(this->csHandle, inst) ||
-       hasIncompleteVectorLane(inst) || hasOmittedPostIndex(inst) ||
-       hasDuplicatedCompareZero(inst))) {
+       hasIncompleteVectorLane(inst))) {
     uint32_t Word = 0;
     if (module.getByteOrder() == gtirb::ByteOrder::Big) {
       for (uint8_t I = 0; I < inst.size; ++I) {
@@ -416,25 +397,6 @@ void Arm64PrettyPrinter::printOperandList(std::ostream& os,
   cs_aarch64& detail = inst.detail->aarch64;
   int opCount = detail.op_count;
 
-  // Capstone may keep PRFM's operation only in op_str and omit it from the
-  // detailed operand array. Recover the architectural PRFOP field from the
-  // instruction word so the emitted instruction remains assembleable.
-  bool InjectedPrefetch = false;
-  bool HasPrefetch = false;
-  for (int I = 0; I < opCount; ++I) {
-    HasPrefetch |= detail.operands[I].type == AARCH64_OP_SYSALIAS &&
-                   detail.operands[I].sysop.sub_type == AARCH64_OP_PRFM;
-  }
-  if (inst.id == AARCH64_INS_PRFM && !HasPrefetch) {
-    assert(inst.size == 4 && "unexpected AArch64 PRFM size");
-    const uint32_t Word = static_cast<uint32_t>(inst.bytes[0]) |
-                          (static_cast<uint32_t>(inst.bytes[1]) << 8) |
-                          (static_cast<uint32_t>(inst.bytes[2]) << 16) |
-                          (static_cast<uint32_t>(inst.bytes[3]) << 24);
-    printOpPrefetch(os, Word & 0x1fU);
-    InjectedPrefetch = true;
-  }
-
   const static std::map<aarch64_insn, uint8_t> Groupings = {
       {AARCH64_INS_LD1, 0},     {AARCH64_INS_LD1B, 0},
       {AARCH64_INS_LD1D, 0},    {AARCH64_INS_LD1H, 0},
@@ -485,7 +447,7 @@ void Arm64PrettyPrinter::printOperandList(std::ostream& os,
   }
 
   for (uint8_t i = 0; i < opCount; i++) {
-    if (i != 0 || InjectedPrefetch) {
+    if (i != 0) {
       os << ',';
     }
 
@@ -676,6 +638,14 @@ void Arm64PrettyPrinter::printOpRegdirect(std::ostream& os, const cs_insn& inst,
   const cs_aarch64_op& op = inst.detail->aarch64.operands[index];
   assert(op.type == AARCH64_OP_REG &&
          "printOpRegdirect called without a register operand");
+  // Alpha11 exposes the implicit FP comparison zero as an XZR/WZR register.
+  // The architectural operand is #0.0; GAS rejects a GPR in this position.
+  if ((inst.id == AARCH64_INS_FCMP || inst.id == AARCH64_INS_FCMPE) &&
+      index == 1 &&
+      (op.reg == AARCH64_REG_XZR || op.reg == AARCH64_REG_WZR)) {
+    os << "#0.0";
+    return;
+  }
   os << getRegisterName(op);
 
   // Capstone does not always populate `vas` for instructions that reference
@@ -753,19 +723,28 @@ void Arm64PrettyPrinter::printOpRegdirect(std::ostream& os, const cs_insn& inst,
     }
   };
 
-  // Add extender if needed.
-  if (op.ext != AARCH64_EXT_INVALID) {
+  // An extending alias (sxtb, uxth, ...) already spells its operation in the
+  // mnemonic. Native Capstone also retains the extender on its source.
+  const bool ExtendingAlias = inst.is_alias &&
+      (inst.alias_id == AARCH64_INS_ALIAS_SXTB ||
+       inst.alias_id == AARCH64_INS_ALIAS_SXTH ||
+       inst.alias_id == AARCH64_INS_ALIAS_SXTW ||
+       inst.alias_id == AARCH64_INS_ALIAS_UXTB ||
+       inst.alias_id == AARCH64_INS_ALIAS_UXTH);
+  if (op.ext != AARCH64_EXT_INVALID && !ExtendingAlias) {
     os << ", ";
     printExtender(os, op.ext, op.shift.type, op.shift.value);
   } else {
     std::string opcode = ascii_str_tolower(inst.mnemonic);
     opcode = opcode.substr(0, 3);
-    if (op.shift.type != AARCH64_SFT_INVALID && op.shift.value != 0) {
+    const std::string shift_type = arm64Shifter2String(op.shift.type);
+    const bool StandaloneShift = opcode == shift_type;
+    if (op.shift.type != AARCH64_SFT_INVALID &&
+        (op.shift.value != 0 || StandaloneShift)) {
       os << ", ";
       // In case where opcode is the same as one of arm64_shifters (e.g., lsl),
       // do not print it again here.
-      std::string shift_type = arm64Shifter2String(op.shift.type);
-      if (shift_type != opcode)
+      if (!StandaloneShift)
         os << shift_type << " ";
       // A shift by a register (Capstone 6 *_REG types) holds the register.
       if (op.shift.type >= AARCH64_SFT_LSL_REG)
@@ -831,6 +810,22 @@ void Arm64PrettyPrinter::printOpIndirect(
   assert(op.type == AARCH64_OP_MEM &&
          "printOpIndirect called without a memory operand");
 
+  // A PC-relative literal is a native memory operand without a base/index,
+  // but assembly syntax uses a bare target rather than brackets.
+  const auto* s = std::get_if<gtirb::SymAddrConst>(symbolic);
+  const auto* sa = std::get_if<gtirb::SymAddrAddr>(symbolic);
+  if (op.mem.base == AARCH64_REG_INVALID &&
+      op.mem.index == AARCH64_REG_INVALID) {
+    if (s) {
+      printSymbolicExpression(os, s, true);
+    } else if (sa) {
+      printSymbolicExpression(os, sa, true);
+    } else {
+      os << "#" << op.mem.disp;
+    }
+    return;
+  }
+
   bool first = true;
 
   os << "[";
@@ -843,9 +838,7 @@ void Arm64PrettyPrinter::printOpIndirect(
 
   // Displacement (constant)
   // Must always be printed if symbolic, even if disp is zero.
-  const auto* s = std::get_if<gtirb::SymAddrConst>(symbolic);
-  const auto* sa = std::get_if<gtirb::SymAddrAddr>(symbolic);
-  if (op.mem.disp != 0 || s || sa) {
+  if (!detail.post_index && (op.mem.disp != 0 || s || sa)) {
     if (!first) {
       os << ",";
     }
@@ -880,7 +873,10 @@ void Arm64PrettyPrinter::printOpIndirect(
 
   os << "]";
 
-  if (inst.detail->writeback && index + 1 == detail.op_count) {
+  if (detail.post_index) {
+    os << ",#" << op.mem.disp;
+  } else if (inst.detail->writeback && index + 1 == detail.op_count &&
+             std::strstr(inst.op_str, "]!") != nullptr) {
     os << "!";
   }
 }
@@ -939,7 +935,7 @@ void Arm64PrettyPrinter::printOpRawValue(std::ostream& os, const cs_insn& inst,
 
 void Arm64PrettyPrinter::printOpBarrier(std::ostream& os,
                                         unsigned int barrier) {
-  // Raw CRm field (AARCH64_DB_*, the values Capstone 5 used as well).
+  // Raw architectural CRm barrier field.
   switch (barrier) {
   case AARCH64_DB_OSHLD:
     os << "oshld";
@@ -985,8 +981,7 @@ void Arm64PrettyPrinter::printOpBarrier(std::ostream& os,
 
 void Arm64PrettyPrinter::printOpPrefetch(std::ostream& os,
                                          unsigned int prefetch) {
-  // Raw five-bit PRFOP field (Capstone 6 AARCH64_PRFM_* are 0-based; Capstone
-  // 5's ARM64_PRFM_* were the same values plus one).
+  // Native raw five-bit PRFOP field.
   switch (prefetch) {
   case AARCH64_PRFM_PLDL1KEEP:
     os << "pldl1keep";
@@ -1043,9 +1038,8 @@ void Arm64PrettyPrinter::printOpPrefetch(std::ostream& os,
     os << "pstl3strm";
     return;
   default:
-    // The names above are the operations Capstone 5 named; the instruction
-    // field itself permits the full five-bit range, and GNU as accepts the
-    // remaining values as an immediate operand.
+    // The field permits the full five-bit range; GNU as accepts the unnamed
+    // operations as an immediate operand.
     if (prefetch <= 0x1f) {
       os << "#" << prefetch;
       return;

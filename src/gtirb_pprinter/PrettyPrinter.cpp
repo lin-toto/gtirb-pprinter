@@ -547,14 +547,9 @@ void PrettyPrinterBase::printBlockContents(std::ostream& os,
 
   // cs_disasm stops at the first instruction it cannot decode (for example
   // one of an extension the handle was not opened with), which would silently
-  // drop the rest of the block from the output. Fail instead. An instruction
-  // the adapter rejects counts as undecodable.
+  // drop the rest of the block from the output. Fail instead.
   uint64_t DecodedSize = 0;
   for (size_t i = 0; i < count; i++) {
-    if (!adaptInstruction(insn[i])) {
-      count = i;
-      break;
-    }
     DecodedSize += insn[i].size;
   }
   if (DecodedSize != x.getSize() - offset) {
@@ -698,8 +693,6 @@ void PrettyPrinterBase::printSymbolDefinition(std::ostream& os,
                                               const gtirb::Symbol& symbol) {
   os << getSymbolName(symbol) << ":\n";
 }
-
-bool PrettyPrinterBase::adaptInstruction(cs_insn&) { return true; }
 
 void PrettyPrinterBase::fixupInstruction(const gtirb::CodeBlock&, cs_insn&) {}
 

@@ -85,6 +85,30 @@ class PrintingPolicyTests(PPrinterTest):
             asm_lines(asm), ["_start:", "ret", ".size _start, . - _start"]
         )
 
+    def test_skip_interp(self):
+        """
+        Check that the dynamic and complete policies skip .interp: the linker
+        writes its own, so printing the original stores the path twice.
+        """
+        ir, m = create_test_module(
+            file_format=gtirb.Module.FileFormat.ELF,
+            isa=gtirb.Module.ISA.X64,
+            binary_type=["DYN"],
+        )
+        _, _ = add_section(m, ".dynamic")
+        _, bi = add_section(m, ".interp")
+        add_data_block(bi, b"/lib64/ld-linux-x86-64.so.2\x00")
+        _, bi = add_text_section(m)
+        add_function(m, "main", add_code_block(bi, b"\xC3"))
+
+        for policy in ("dynamic", "complete"):
+            asm = run_asm_pprinter(ir, ["--policy", policy])
+            self.assertNotIn(".interp", asm)
+        asm = run_asm_pprinter(
+            ir, ["--policy", "complete", "--keep-section", ".interp"]
+        )
+        self.assertIn(".interp", asm)
+
     def test_skip_function_alias(self):
         """
         Check that skip function works with
